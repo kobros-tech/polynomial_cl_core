@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parents[1]
 
 
@@ -74,7 +76,8 @@ def test_class_incremental_script_strategies_mode(tmp_path):
     assert result["protocol"]["experiment"] == "strategies"
     assert result["protocol"]["n_ref_per_class"] == 1
     assert set(result["summary"]) == {
-        "ordinary", "ordinary_no_replay", "small_old_lr", "frozen_old", "strategy_b"
+        "ordinary", "ordinary_no_replay", "small_old_lr", "frozen_old", "strategy_b",
+        "strategy_b_new",
     }  # fmt: skip
 
 
@@ -127,3 +130,35 @@ def test_rate_selection_rejects_overlapping_selection_and_test_seeds(tmp_path):
 def test_rate_selection_defaults_use_disjoint_seed_sets(tmp_path):
     proc = run_script("rate_selection.py", "--help")
     assert "must be disjoint" in proc.stdout.replace("\n", " ")
+
+
+def test_per_degree_script_runs_study_then_epoch_robustness(tmp_path):
+    common = (
+        "--dataset", "synthetic_2d", "--train-per-class", 12, "--test-per-class", 6,
+        "--memory-per-class", 4, "--n-ref-per-class", 1, "--batch-size", 16,
+        "--strategies", "strategy_b_new", "--samplings", "class_balanced", "--validation-fraction", 0.5,
+    )  # fmt: skip
+    cell = tmp_path / "cell_strategy_b_new_class_balanced.json"
+    run_script(
+        "per_degree_lr.py", *common, "--experiment", "per-degree", "--epochs", 1,
+        "--select-seeds", 0, "--test-seeds", 1, 2, "--output", cell,
+    )  # fmt: skip
+    study = json.loads(cell.read_text())
+    assert study["selection_seeds"] == [0] and study["test_seeds"] == [1, 2]
+    (c,) = study["cells"]
+    assert c["strategy"] == "strategy_b_new" and c["selected"] in c["pareto"]
+    longer = tmp_path / "epochs.json"
+    run_script(
+        "per_degree_lr.py", *common, "--experiment", "epochs", "--epochs", 2,
+        "--cells-dir", tmp_path, "--output", longer,
+    )  # fmt: skip
+    result = json.loads(longer.read_text())
+    assert result["epochs"] == 2 and result["cells"][0]["selected"] == c["selected"]
+    with pytest.raises(
+        subprocess.CalledProcessError
+    ) as error:  # overlap rejected up front
+        run_script(
+            "per_degree_lr.py", *common, "--experiment", "per-degree", "--select-seeds", 1,
+            "--test-seeds", 1, "--output", tmp_path / "bad.json",
+        )  # fmt: skip
+    assert "overlap" in error.value.stderr and not (tmp_path / "bad.json").exists()

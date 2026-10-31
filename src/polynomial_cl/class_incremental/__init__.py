@@ -11,6 +11,8 @@ from .data import TASK_ORDER, holdout_split, load_projected_mnist, make_syntheti
 from .degree_rates import N_DEGREE_GROUPS, as_degree_rates, degree_of_feature
 from .degree_study import (
     candidate_vectors,
+    load_study_cells,
+    run_epoch_robustness,
     run_per_degree_study,
     run_sampling_comparison,
 )
@@ -36,11 +38,13 @@ __all__ = [
     "degree_of_feature",
     "holdout_split",
     "load_projected_mnist",
+    "load_study_cells",
     "make_feature_data",
     "make_synthetic_2d",
     "make_task_plan",
     "run_comparison",
     "run_condition",
+    "run_epoch_robustness",
     "run_joint_reference",
     "run_per_degree_study",
     "run_sampling_comparison",

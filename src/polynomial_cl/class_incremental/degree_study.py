@@ -53,7 +53,7 @@ from .experiment import (
 )
 
 SHARED_RATE_GRID = (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
-RATE_FACTORS = (0.25, 4.0)
+RATE_FACTORS = (0.25, 0.5, 2.0, 4.0)
 SELECTION_METRICS = ("final_mean_accuracy", "mean_forgetting", "final_current_accuracy")
 TRADEOFF_METRICS = (*STRATEGY_METRICS, "final_current_accuracy")
 
@@ -402,3 +402,56 @@ def load_study_cells(directory):
         "selection_rule": first["selection_rule"],
         "cells": cells,
     }
+
+
+def run_epoch_robustness(
+    test_data,
+    study,
+    epochs,
+    *,
+    test_seeds=None,
+    batch_size=BATCH_SIZE,
+    memory_per_class=MEMORY_PER_CLASS,
+    n_ref_per_class=N_REF_PER_CLASS,
+    strategies=None,
+    samplings=None,
+):
+    """Re-run the shared reference and the selected vector of every cell at another epoch count.
+
+    The vectors are the ones chosen at the study's own epoch count (nothing is re-selected),
+    so this asks whether the conclusion survives longer training, not what the best rates for
+    that length are. ``study`` is the structure from ``run_per_degree_study`` or
+    ``load_study_cells``; ``test_seeds`` defaults to the study's test seeds.
+    """
+    seeds = list(study["test_seeds"] if test_seeds is None else test_seeds)
+    if set(seeds) & set(study["selection_seeds"]):
+        raise ValueError("robustness seeds must not include the selection seeds")
+    cells = []
+    for cell in study["cells"]:
+        if strategies is not None and cell["strategy"] not in strategies:
+            continue
+        if samplings is not None and cell["sampling"] not in samplings:
+            continue
+        names = list(dict.fromkeys(["shared", cell["selected"]]))
+        runs = evaluate_vectors(
+            test_data,
+            seeds,
+            cell["strategy"],
+            cell["sampling"],
+            {n: cell["vectors"][n] for n in names},
+            epochs=epochs,
+            batch_size=batch_size,
+            memory_per_class=memory_per_class,
+            n_ref_per_class=n_ref_per_class,
+        )
+        cells.append(
+            {
+                "strategy": cell["strategy"],
+                "sampling": cell["sampling"],
+                "epochs": epochs,
+                "selected": cell["selected"],
+                "vectors": {n: cell["vectors"][n] for n in names},
+                "runs": runs,
+            }
+        )
+    return {"epochs": epochs, "test_seeds": seeds, "cells": cells}

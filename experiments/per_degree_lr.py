@@ -5,6 +5,10 @@
 ``--experiment sampling``: every strategy under ``shuffled`` and ``class_balanced`` sampling
 with one shared rate (test data, seeds ``--seeds``).
 
+``--experiment epochs``: re-runs the shared reference and the selected vector of every cell found
+in ``--cells-dir`` (``cell_*.json`` from the per-degree experiment) at ``--epochs`` epochs on the
+test seeds, without re-selecting rates.
+
 ``--experiment per-degree``: for every (strategy, sampling) the rate vectors are selected on a
 validation split with ``--select-seeds`` and then run on the test set with ``--test-seeds``
 (disjoint). See polynomial_cl/class_incremental/degree_study.py for the protocol; this script
@@ -19,7 +23,9 @@ from class_incremental import add_dataset_arguments, load_dataset
 
 from polynomial_cl.class_incremental import (
     holdout_split,
+    load_study_cells,
     make_feature_data,
+    run_epoch_robustness,
     run_per_degree_study,
     run_sampling_comparison,
 )
@@ -36,7 +42,9 @@ from polynomial_cl.class_incremental.training import SAMPLING_POLICIES
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     add_dataset_arguments(p)
-    p.add_argument("--experiment", choices=("sampling", "per-degree"), required=True)
+    p.add_argument(
+        "--experiment", choices=("sampling", "per-degree", "epochs"), required=True
+    )
     p.add_argument("--output", type=Path, required=True)
     p.add_argument(
         "--strategies", nargs="+", default=list(STRATEGIES), choices=STRATEGIES
@@ -57,12 +65,13 @@ def main():
     p.add_argument(
         "--lr", type=float, default=0.1, help="sampling experiment: shared rate"
     )
-    p.add_argument("--select-seeds", nargs="+", type=int, default=[0, 1])
-    p.add_argument("--test-seeds", nargs="+", type=int, default=[2, 3, 4, 5, 6])
+    p.add_argument("--select-seeds", nargs="+", type=int, default=[0, 1, 2])
+    p.add_argument("--test-seeds", nargs="+", type=int, default=[3, 4, 5, 6, 7, 8, 9])
     p.add_argument(
         "--min-current-accuracy", type=float, default=None,
         help="per-degree: validation floor on newest-experience accuracy for selection",
     )  # fmt: skip
+    p.add_argument("--cells-dir", type=Path, default=Path("results/per_degree"))
     p.add_argument("--validation-fraction", type=float, default=0.1)
     p.add_argument("--epochs", type=int, default=EPOCHS)
     p.add_argument("--batch-size", type=int, default=BATCH_SIZE)
@@ -92,6 +101,20 @@ def main():
             strategies=args.strategies,
             learning_rate=args.lr,
             **settings,
+        )
+    elif args.experiment == "epochs":
+        study = load_study_cells(args.cells_dir)
+        if study is None:
+            p.error(f"no cell_*.json files in {args.cells_dir}")
+        result = run_epoch_robustness(
+            make_feature_data(train_x, train_y, test_x, test_y),
+            study,
+            args.epochs,
+            batch_size=args.batch_size,
+            memory_per_class=args.memory_per_class,
+            n_ref_per_class=args.n_ref_per_class,
+            strategies=args.strategies,
+            samplings=args.samplings,
         )
     else:
         fit = holdout_split(train_x, train_y, args.validation_fraction)

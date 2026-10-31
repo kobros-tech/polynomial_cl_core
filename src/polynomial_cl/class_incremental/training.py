@@ -65,6 +65,7 @@ def fit_task(
     eligible_classes: np.ndarray | None = None,
     update_scale: np.ndarray | None = None,
     null_basis: np.ndarray | None = None,
+    null_groups: list | None = None,
     feature_scale: np.ndarray | None = None,
     group_scale: np.ndarray | None = None,
     group_index: np.ndarray | None = None,
@@ -87,6 +88,12 @@ def fit_task(
     ``null_basis`` it is D^(1/2) N N^T D^(1/2) g, so ``null_basis`` must then span the null
     space of the design scaled by D^(1/2); this stays a descent direction and keeps the
     constraint exactly.
+
+    ``null_groups`` generalises ``null_basis`` to column-dependent constraints: a list of
+    ``(columns, basis)`` where ``columns`` is a slice over the eligible output columns and
+    ``basis`` (n_features, k) spans the directions allowed for those columns (rows outside the
+    trainable rows of that column group are zero in the basis, so they cannot move). Columns
+    outside every group are updated unprojected. It cannot be combined with ``null_basis``.
 
     ``group_scale`` (n_features,) is the per-degree-group multiplier (see ``degree_rates``):
     non-negative, 0 freezes a feature row. It multiplies into the same diagonal D as
@@ -128,6 +135,14 @@ def fit_task(
         raise ValueError("update_scale must have the same shape as weights")
     if null_basis is not None and null_basis.shape[0] != weights.shape[0]:
         raise ValueError("null_basis must have one row per feature")
+    if null_groups is not None:
+        if null_basis is not None:
+            raise ValueError("null_groups and null_basis cannot be combined")
+        for columns, basis in null_groups:
+            if not isinstance(columns, slice) or basis.shape[0] != weights.shape[0]:
+                raise ValueError(
+                    "null_groups need (slice, basis with one row per feature)"
+                )
     if feature_scale is not None:
         feature_scale = np.asarray(feature_scale, dtype=weights.dtype)
         if feature_scale.shape != (weights.shape[0],) or not np.all(feature_scale > 0):
@@ -199,7 +214,19 @@ def fit_task(
         raw_gradient = gradient
         if update_scale is not None:
             gradient = gradient * update_scale[:, eligible_classes]
-        if step_scale is None:
+        if null_groups is not None:
+            masked = gradient
+            gradient = (
+                masked.copy() if step_scale is None else masked * step_scale[:, None]
+            )
+            for columns, basis in null_groups:
+                if step_scale is None:
+                    gradient[:, columns] = basis @ (basis.T @ masked[:, columns])
+                else:
+                    gradient[:, columns] = scale_root * (
+                        basis @ (basis.T @ (scale_root * masked[:, columns]))
+                    )
+        elif step_scale is None:
             if null_basis is not None:
                 gradient = null_basis @ (null_basis.T @ gradient)
         elif null_basis is None:

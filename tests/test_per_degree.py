@@ -439,8 +439,11 @@ def test_accuracy_and_forgetting_follow_from_the_matrix(tiny_data):
 
 
 def test_candidate_vectors_vary_one_group_at_a_time():
+    from polynomial_cl.class_incremental.degree_study import RATE_FACTORS
+
     vectors = candidate_vectors(0.1)
-    assert len(vectors) == 1 + 2 * N_DEGREE_GROUPS
+    assert RATE_FACTORS == (0.25, 0.5, 2.0, 4.0)
+    assert len(vectors) == 1 + len(RATE_FACTORS) * N_DEGREE_GROUPS
     assert vectors["shared"] == [0.1] * 4
     for name, vector in vectors.items():
         if name != "shared":
@@ -450,11 +453,19 @@ def test_candidate_vectors_vary_one_group_at_a_time():
 
 
 def test_combined_vector_takes_each_groups_best_direction_only_if_it_helps():
+    factors = (0.25, 0.5, 2.0, 4.0)
     scores = {"shared": 0.5}
     for g in range(4):
-        scores[f"d{g}x0.25"], scores[f"d{g}x4"] = 0.4, 0.4
-    scores["d1x4"], scores["d2x0.25"], scores["d3x4"] = 0.6, 0.55, 0.7
-    assert combine_best_directions(0.1, scores) == pytest.approx([0.1, 0.4, 0.025, 0.4])
+        for f in factors:
+            scores[f"d{g}x{f:g}"] = 0.4
+    scores["d1x4"], scores["d1x2"], scores["d2x0.25"], scores["d3x4"] = (
+        0.6,
+        0.62,
+        0.55,
+        0.7,
+    )
+    # group 1 takes its best factor (2, not 4); group 0 keeps the base rate (nothing beats it)
+    assert combine_best_directions(0.1, scores) == pytest.approx([0.1, 0.2, 0.025, 0.4])
 
 
 def test_study_rejects_overlapping_seeds_and_runs_end_to_end(tiny_data):
@@ -601,3 +612,105 @@ def test_study_cells_report_validation_metrics_and_the_pareto_front(tiny_data):
         and cell["selected"] in cell["pareto"]
     )
     assert "forgetting" in study["selection_rule"]
+
+
+# ----------------------------------------------------------- strategy_b_new
+def test_strategy_b_new_freezes_old_coefficients_and_keeps_reference_logits(tiny_data):
+    run = _run(tiny_data, "strategy_b_new", n_ref_per_class=1)
+    # features per experience are 3, 6, 10, 10, 10: experiences 4 and 5 add no feature rows,
+    # so no old-class output can move at all (old coefficients frozen, no new rows to use)
+    assert run["old_logit_change_by_task"][3] == 0.0
+    assert run["old_logit_change_by_task"][4] == 0.0
+    assert max(c for c in run["ref_logit_change_by_task"] if c is not None) <= 1e-4
+    assert run["null_dim_by_task"][0] is None  # nothing to preserve in experience 1
+    unconstrained = _run(tiny_data, "strategy_b", n_ref_per_class=1)
+    # strategy_b may still move old coefficients (inside the null space); b_new may not
+    assert unconstrained["old_logit_change_by_task"][3] > 0.0
+
+
+def test_strategy_b_new_updates_match_the_documented_subspaces():
+    rng = np.random.default_rng(5)
+    count, old_rows, old_classes, n_seen = 10, 6, 2, 4
+    x = rng.normal(size=(30, count)).astype(np.float32)
+    y = rng.integers(old_classes, n_seen, size=30)
+    refs = rng.normal(size=(3, count)).astype(np.float32)
+    rows = np.arange(old_rows, count)
+    rows_basis = null_space_basis(refs[:, rows])
+    old_basis = np.zeros((count, rows_basis.shape[1]), np.float32)
+    old_basis[rows] = rows_basis
+    groups = [
+        (slice(0, old_classes), old_basis),
+        (slice(old_classes, n_seen), null_space_basis(refs)),
+    ]
+    mask = np.ones((count, 10), np.float32)
+    mask[:old_rows, :old_classes] = 0.0
+    start = rng.normal(size=(count, 10)).astype(np.float32)
+    out = start.copy()
+    fit_task(
+        out, x, y, EMPTY_X, EMPTY_Y, epochs=4, learning_rate=0.1, batch_size=8, seed=0,
+        eligible_classes=np.arange(n_seen), update_scale=mask, null_groups=groups,
+    )  # fmt: skip
+    moved = out - start
+    assert not moved[:old_rows, :old_classes].any()  # old coefficients bit-identical
+    assert np.abs(moved[:, old_classes:n_seen]).max() > 1e-3  # new classes do learn
+    np.testing.assert_allclose(
+        refs @ moved[:, :n_seen], 0, atol=1e-4
+    )  # references unchanged
+    assert not moved[:, n_seen:].any()  # classes not introduced yet are untouched
+
+
+def test_null_groups_are_validated_and_exclusive_with_null_basis():
+    x, y = _toy()
+    w = np.zeros((10, 10), np.float32)
+    kwargs = {"epochs": 1, "learning_rate": 0.1, "batch_size": 8, "seed": 0}
+    basis = np.eye(10, 3, dtype=np.float32)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        fit_task(
+            w,
+            x,
+            y,
+            EMPTY_X,
+            EMPTY_Y,
+            null_basis=basis,
+            null_groups=[(slice(0, 2), basis)],
+            **kwargs,
+        )
+    with pytest.raises(ValueError, match="null_groups need"):
+        fit_task(w, x, y, EMPTY_X, EMPTY_Y, null_groups=[((0, 2), basis)], **kwargs)
+    with pytest.raises(ValueError, match="null_groups need"):
+        fit_task(
+            w, x, y, EMPTY_X, EMPTY_Y, null_groups=[(slice(0, 2), basis[:5])], **kwargs
+        )
+
+
+def test_strategy_b_new_with_rate_vector_keeps_references_and_zero_group_frozen(
+    tiny_data,
+):
+    run = _run(
+        tiny_data,
+        "strategy_b_new",
+        n_ref_per_class=1,
+        learning_rate=[0.3, 0.0, 0.1, 0.2],
+    )
+    assert max(c for c in run["ref_logit_change_by_task"] if c is not None) <= 1e-4
+    assert all(row[1] == 0.0 for row in run["degree_diagnostics"]["coef_change_l1"])
+
+
+def test_epoch_robustness_reuses_selected_vectors_without_reselecting(tiny_data):
+    from polynomial_cl.class_incremental import run_epoch_robustness
+
+    study = run_per_degree_study(
+        tiny_data, tiny_data, [0], [1, 2], strategies=("ordinary",), samplings=("shuffled",),
+        epochs=1, batch_size=16, memory_per_class=4, n_ref_per_class=1,
+    )  # fmt: skip
+    longer = run_epoch_robustness(
+        tiny_data, study, 2, batch_size=16, memory_per_class=4, n_ref_per_class=1
+    )
+    cell, source = longer["cells"][0], study["cells"][0]
+    assert longer["epochs"] == 2 and longer["test_seeds"] == [1, 2]
+    assert cell["selected"] == source["selected"]
+    assert set(cell["runs"]) <= {"shared", source["selected"]}
+    assert cell["vectors"]["shared"] == source["vectors"]["shared"]
+    assert all(r["seed"] in (1, 2) for runs in cell["runs"].values() for r in runs)
+    with pytest.raises(ValueError, match="selection seeds"):
+        run_epoch_robustness(tiny_data, study, 2, test_seeds=[0])

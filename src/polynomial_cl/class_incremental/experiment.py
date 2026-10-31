@@ -49,12 +49,16 @@ SUMMARY_METRICS = ("final_mean_accuracy", "final_current_accuracy", "mean_forget
 # experiments in polynomial_cl.training). A coefficient is "old" if it existed before the
 # current experience: its feature row was already present AND its class column was already
 # introduced. New feature rows and the new classes' columns always train freely.
+# ``strategy_b`` is the binary ``strategy_b_all`` (every coefficient may move inside the null
+# space of the reference inputs); ``strategy_b_new`` is the binary ``strategy_b_new``: old
+# coefficients are frozen and only new ones move, also inside that null space.
 STRATEGIES = (
     "ordinary",
     "ordinary_no_replay",
     "small_old_lr",
     "frozen_old",
     "strategy_b",
+    "strategy_b_new",
 )
 OLD_LR_FACTOR = 0.1
 N_REF_PER_CLASS = (
@@ -153,13 +157,22 @@ def _mean_after_first(values):
 
 def _record_indicators(
     out, weights, before, data, count, task, old_test, refs, scale, null_basis,
-    loss_before, loss_after, step_scale=None,
+    loss_before, loss_after, step_scale=None, null_groups=None,
 ):  # fmt: skip
     n_seen, old_classes = 2 * (task + 1), 2 * task
     used = (slice(None, count), slice(None, n_seen))
     out["train_loss_by_task"].append([loss_before, loss_after])
     out["l1_update_by_task"].append(float(np.abs(weights - before)[used].sum()))
-    if null_basis is not None:
+    if null_groups is not None:
+        root = (
+            None if step_scale is None else np.sqrt(np.asarray(step_scale, np.float64))
+        )
+        trainable = 0
+        for columns, basis in null_groups:
+            free = basis if root is None else root[:, None] * basis
+            rank = int(np.linalg.matrix_rank(free)) if free.size else 0
+            trainable += rank * len(range(*columns.indices(n_seen)))
+    elif null_basis is not None:
         # The step is sqrt(D) N N^T sqrt(D) g, so the directions that can actually move are the
         # column space of sqrt(D) N (rank), not all columns of N: a zero-rate feature group
         # contributes null-space directions that are multiplied by 0.
@@ -177,9 +190,8 @@ def _record_indicators(
             allowed &= (np.asarray(step_scale)[:count] > 0)[:, None]
         trainable = int(allowed.sum())
     out["n_trainable_by_task"].append(int(trainable))
-    out["null_dim_by_task"].append(
-        None if null_basis is None else int(null_basis.shape[1])
-    )
+    kept = null_groups[0][1] if null_groups is not None else null_basis
+    out["null_dim_by_task"].append(None if kept is None else int(kept.shape[1]))
     if task:
         x = data.test_x[old_test, :count]
         old_before, old_after = (
@@ -358,12 +370,35 @@ def run_condition(
             step_scale = (
                 group_scale if feature_scale is None else feature_scale * group_scale
             )
-        scale = null_basis = refs = None
+        scale = null_basis = refs = null_groups = None
         if strategy in ("frozen_old", "small_old_lr"):
             scale = np.ones(weights.shape, np.float32)
             scale[:old_rows, :old_classes] = (
                 0.0 if strategy == "frozen_old" else OLD_LR_FACTOR
             )
+        elif strategy == "strategy_b_new" and task:
+            scale = np.ones(weights.shape, np.float32)
+            scale[:old_rows, :old_classes] = 0.0
+            refs = np.concatenate(
+                [memory_indices[c][:n_ref_per_class] for c in range(old_classes)]
+            )
+            ref_design = data.train_x[refs, :count]
+            if step_scale is not None:
+                ref_design = ref_design * np.sqrt(step_scale)
+            # Old-class columns may only move through the NEW feature rows; the null space is
+            # taken inside those rows. New-class columns see every row (nothing there is old),
+            # as in strategy_b, so reference inputs also keep their new-class logits.
+            rows = np.arange(old_rows, count)
+            old_basis = np.zeros((count, 0), np.float32)
+            if len(rows):
+                old_basis = np.zeros(
+                    (count, null_space_basis(ref_design[:, rows]).shape[1]), np.float32
+                )
+                old_basis[rows] = null_space_basis(ref_design[:, rows])
+            null_groups = [
+                (slice(0, old_classes), old_basis),
+                (slice(old_classes, n_seen), null_space_basis(ref_design)),
+            ]
         elif strategy == "strategy_b" and task:
             refs = np.concatenate(
                 [memory_indices[c][:n_ref_per_class] for c in range(old_classes)]
@@ -389,6 +424,7 @@ def run_condition(
             eligible_classes=np.arange(n_seen),
             update_scale=scale,
             null_basis=null_basis,
+            null_groups=null_groups,
             feature_scale=feature_scale,
             group_scale=group_scale,
             group_index=group_index,
@@ -427,7 +463,7 @@ def run_condition(
         _record_indicators(
             indicators, weights, before, data, count, task, old_test, refs, scale, null_basis,
             loss_before, cross_entropy(weights, train_x, train_y, n_seen),
-            step_scale=step_scale,
+            step_scale=step_scale, null_groups=null_groups,
         )  # fmt: skip
         matrix[task, : task + 1] = accuracy_by_task(
             weights, data.test_x[:, :count], data.test_y, task + 1

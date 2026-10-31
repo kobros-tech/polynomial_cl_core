@@ -401,7 +401,7 @@ def test_strategy_b_preserves_reference_logits_and_reports_the_free_dimension(
     assert b["null_dim_by_task"] == [None, 4, 6, 4, 2]
     assert max(c for c in b["ref_logit_change_by_task"] if c is not None) <= 1e-4
     assert b["n_trainable_by_task"][1:] == [4 * 4, 6 * 6, 4 * 8, 2 * 10]
-    for name in set(STRATEGIES) - {"strategy_b"}:
+    for name in set(STRATEGIES) - {"strategy_b", "strategy_b_new"}:
         assert all(v is None for v in runs[name]["null_dim_by_task"])
         assert all(v is None for v in runs[name]["ref_logit_change_by_task"])
 
@@ -411,8 +411,9 @@ def test_indicators_are_recorded_for_every_strategy(tiny_data):
         assert len(run["train_loss_by_task"]) == 5, name
         losses = run["train_loss_by_task"]
         assert all(before >= after >= 0 for before, after in losses), name
-        if (
-            name != "strategy_b"
+        if name not in (
+            "strategy_b",
+            "strategy_b_new",
         ):  # B may have no free dimension left, i.e. nothing to learn
             assert all(before > after for before, after in losses), name
             assert all(v > 0 for v in run["l1_update_by_task"]), name
@@ -551,9 +552,9 @@ def test_feature_power_runs_for_every_strategy_and_zero_is_the_default(tiny_data
             "expanding", tiny_data, tasks, memory, strategy=strategy, feature_power=1.0,
             n_ref_per_class=1, **kwargs,
         )  # fmt: skip
-        assert (
-            run["accuracy_matrix"] != default["accuracy_matrix"]
-            or strategy == "strategy_b"
+        assert run["accuracy_matrix"] != default["accuracy_matrix"] or strategy in (
+            "strategy_b",
+            "strategy_b_new",
         )
         assert np.isfinite(run["final_mean_accuracy"]) and np.isfinite(
             run["mean_loss_reduction"]
