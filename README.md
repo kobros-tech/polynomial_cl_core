@@ -74,7 +74,7 @@ Two different mechanisms lower the accuracy on old classes, and the accuracy mat
 
 ### Update rules (`--experiment strategies`, `expanding` schedule)
 
-`ordinary` (replay, everything trains), `ordinary_no_replay`, `frozen_old`, `small_old_lr` (old coefficients get 0.1 x the gradient) and `strategy_b` (every gradient is projected onto the null space of the design matrix at `--n-ref-per-class` stored inputs per old class, so the logits at those inputs cannot change). A coefficient is _old_ if its feature row existed before the current experience **and** its class column was already introduced; new feature rows and the new classes' columns always train.
+`ordinary` (replay, everything trains), `ordinary_no_replay`, `frozen_old`, `small_old_lr` (old coefficients get 0.1 x the gradient) and `strategy_b` (every gradient is projected onto the null space of the design matrix at `--n-ref-per-class` stored inputs per old class, so the logits at those inputs cannot change). `strategy_b_new` is the binary `strategy_b_new`: old coefficients are frozen as in `frozen_old`, and the old classes' outputs may move only through newly added feature rows, inside the same null space; the new classes' columns use the full null space. A coefficient is _old_ if its feature row existed before the current experience **and** its class column was already introduced; new feature rows and the new classes' columns always train.
 
 ```bash
 python experiments/class_incremental.py --dataset split_mnist --experiment strategies --output results/split_mnist_strategies.json
@@ -109,7 +109,7 @@ bash experiments/run_per_degree_study.sh
 python experiments/per_degree_lr.py --dataset split_mnist --experiment per-degree --strategies ordinary --samplings class_balanced --output results/per_degree/cell_ordinary_class_balanced.json
 ```
 
-Protocol of the per-degree study: every candidate is measured on a 10% validation split (seeds 0-1) for final mean accuracy, mean forgetting and newest-experience accuracy, so accuracy alone never decides. The shared rate is chosen from {0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30}; one degree group at a time is then made 4x larger or 4x smaller; one follow-up vector takes each group's best factor; and all vectors are run on the test set with disjoint seeds 2-6. The Pareto front on (accuracy, forgetting) is recorded for every cell; where one vector is needed, the front member with the largest accuracy minus forgetting is marked `selected` (optionally with a floor `--min-current-accuracy` on newest-experience accuracy). `selected` is a convenience for reading results, not a claim of optimality. Joint (shuffled, all-class) training on the same features is available as `run_joint_reference` and is shown in notebook 01; it has no forgetting.
+Protocol of the per-degree study: every candidate is measured on a 10% validation split (seeds 0-2) for final mean accuracy, mean forgetting and newest-experience accuracy, so accuracy alone never decides. The shared rate is chosen from {0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30}; one degree group at a time is then made 0.25x, 0.5x, 2x or 4x of it; one follow-up vector takes each group's best factor; and all vectors are run on the test set with disjoint seeds 3-9. The Pareto front on (accuracy, forgetting) is recorded for every cell; where one vector is needed, the front member with the largest accuracy minus forgetting is marked `selected` (optionally with a floor `--min-current-accuracy` on newest-experience accuracy). `selected` is a convenience for reading results, not a claim of optimality. Joint (shuffled, all-class) training on the same features is available as `run_joint_reference` and is shown in notebook 01; it has no forgetting.
 
 ### How to read the results
 
@@ -209,28 +209,51 @@ All numbers are mean +/- sample standard deviation over seeds, produced by the c
 | `small_old_lr` | 0.260 / 0.897 / 0.838 / 0.940 | 0.663 / 0.488 / 0.102 / 0.077 |
 | `frozen_old` | 0.274 / 0.893 / 0.820 / 0.925 | 0.667 / 0.493 / 0.102 / 0.077 |
 | Strategy B, 3 refs | 0.538 / 0.683 / 0.405 / 0.381 | 0.630 / 0.186 / 0.053 / 0.058 |
+| Strategy B new, 3 refs | 0.543 / 0.496 / 0.336 / 0.304 | 0.601 / 0.178 / 0.067 / 0.060 |
 
 - **Budget:** both policies make the same number of updates (315 in the last experience); `shuffled` processes exactly the 40,200 available examples and `class_balanced` 40,320 (+0.3%, because every batch is full). Both counts are stored per experience.
 - **The imbalance is a major cause of takeover and forgetting** (the untested explanation above is now tested): balancing the batches removes most takeover. It costs plasticity, so neither policy is best on both axes. Without replay there is nothing to balance.
 
-**Per-degree rate vectors (test seeds 2-6; rates and vectors chosen on validation seeds 0-1).** Accuracy +/- std over seeds / newest-experience accuracy / forgetting; "shared" is the validation-chosen single rate (grid up to 30), "selected" the vector chosen by the rule above:
+**Per-degree rate vectors, six strategies (test seeds 3-9; rates chosen on validation seeds 0-2 by Pareto front and accuracy minus forgetting; 3 epochs per experience).** "Shared" is the validation-chosen single rate from the grid 0.01-30, "selected" is the vector the rule picked among the shared reference, 16 one-group vectors (each group x0.25, x0.5, x2, x4) and one follow-up vector. The last column is the paired difference (selected minus shared) over the seven test seeds.
 
-| strategy | sampling | shared | selected vector `[d0, d1, d2, d3]` |
+| strategy | sampling | shared rate: acc +/- std / newest / forgetting | selected vector `[d0, d1, d2, d3]`: acc +/- std / newest / forgetting | paired change in acc (seeds better) |
+| --- | --- | --- | --- | --- |
+| `ordinary` | balanced | 3: 0.769 +/- 0.003 / 0.706 / 0.097 | `[0.75, 1.5, 1.5, 6]`: 0.773 +/- 0.003 / 0.716 / 0.096 | +0.004 +/- 0.002 (7/7) |
+| `small_old_lr` | balanced | 10: 0.780 +/- 0.004 / 0.732 / 0.105 | `[20, 10, 10, 10]`: 0.778 +/- 0.005 / 0.729 / 0.101 | -0.002 +/- 0.002 (0/7) |
+| `frozen_old` | balanced | 10: 0.776 +/- 0.005 / 0.724 / 0.108 | `[2.5, 2.5, 10, 10]`: 0.778 +/- 0.004 / 0.722 / 0.105 | +0.003 +/- 0.002 (7/7) |
+| Strategy B | balanced | 3: 0.764 +/- 0.002 / 0.673 / 0.094 | `[12, 0.75, 0.75, 6]`: 0.769 +/- 0.003 / 0.693 / 0.090 | +0.005 +/- 0.002 (7/7) |
+| Strategy B new | balanced | 10: 0.771 +/- 0.002 / 0.691 / 0.103 | `[5, 5, 2.5, 10]`: 0.767 +/- 0.003 / 0.683 / 0.098 | -0.004 +/- 0.001 (0/7) |
+| `ordinary_no_replay` | balanced | 0.01: 0.221 +/- 0.000 / 0.866 / 0.865 | `[0.0025, 0.01, 0.02, 0.04]`: 0.256 +/- 0.000 / 0.870 / 0.824 | +0.035 +/- 0.000 (7/7) |
+| `ordinary` | shuffled | 30: 0.568 +/- 0.072 / 0.888 / 0.437 | `[30, 30, 30, 120]`: 0.626 +/- 0.081 / 0.898 / 0.374 | +0.058 +/- 0.068 (5/7) |
+| `small_old_lr` | shuffled | 10: 0.548 +/- 0.050 / 0.904 / 0.487 | `[2.5, 40, 20, 40]`: 0.585 +/- 0.065 / 0.906 / 0.429 | +0.037 +/- 0.044 (6/7) |
+| `frozen_old` | shuffled | 30: 0.462 +/- 0.071 / 0.863 / 0.557 | `[15, 30, 30, 30]`: 0.476 +/- 0.063 / 0.881 / 0.551 | +0.014 +/- 0.029 (6/7) |
+| Strategy B | shuffled | 30: 0.648 +/- 0.008 / 0.918 / 0.371 | `[120, 120, 120, 60]`: 0.653 +/- 0.010 / 0.893 / 0.327 | +0.005 +/- 0.008 (6/7) |
+| Strategy B new | shuffled | 0.03: 0.535 +/- 0.020 / 0.353 / 0.287 | `[0.12, 0.12, 0.03, 0.0075]`: 0.505 +/- 0.033 / 0.116 / 0.167 | -0.030 +/- 0.024 (0/7) |
+| `ordinary_no_replay` | shuffled | 0.01: 0.221 +/- 0.000 / 0.869 / 0.869 | `[0.0025, 0.0025, 0.01, 0.04]`: 0.264 +/- 0.000 / 0.861 / 0.815 | +0.044 +/- 0.000 (7/7) |
+
+**Does the conclusion survive longer training?** The same vectors (chosen at 3 epochs, not re-selected) were re-run at 10 epochs on the same test seeds:
+
+| strategy | sampling | shared rate at 10 epochs: acc +/- std / newest / forgetting | selected (chosen at 3 epochs) minus shared: change in acc (seeds better) |
 | --- | --- | --- | --- |
-| `ordinary` | balanced | 3: 0.771 +/- 0.003 / 0.708 / 0.098 | `[0.75, 0.75, 0.75, 12]`: 0.776 +/- 0.005 / 0.730 / 0.101 |
-| `small_old_lr` | balanced | 3: 0.764 +/- 0.002 / 0.697 / 0.102 | `[3, 3, 3, 12]`: 0.780 +/- 0.003 / 0.729 / 0.102 |
-| `frozen_old` | balanced | 3: 0.761 +/- 0.003 / 0.694 / 0.103 | `[3, 3, 3, 12]`: 0.776 +/- 0.005 / 0.726 / 0.104 |
-| Strategy B | balanced | 3: 0.765 +/- 0.003 / 0.670 / 0.093 | `[12, 0.75, 0.75, 3]`: 0.759 +/- 0.002 / 0.650 / 0.085 |
-| `ordinary` | shuffled | 30: 0.604 +/- 0.082 / 0.881 / 0.372 | `[30, 30, 7.5, 30]`: 0.597 +/- 0.067 / 0.881 / 0.382 |
-| `small_old_lr` | shuffled | 10: 0.560 +/- 0.047 / 0.898 / 0.462 | `[2.5, 2.5, 10, 40]`: 0.591 +/- 0.033 / 0.906 / 0.435 |
-| `frozen_old` | shuffled | 30: 0.475 +/- 0.084 / 0.862 / 0.541 | `[7.5, 30, 30, 120]`: 0.522 +/- 0.071 / 0.901 / 0.501 |
-| Strategy B | shuffled | 30: 0.645 +/- 0.007 / 0.919 / 0.373 | `[120, 120, 120, 120]`: 0.650 +/- 0.016 / 0.896 / 0.334 |
+| `ordinary` | balanced | 0.778 +/- 0.004 / 0.749 / 0.117 | +0.003 +/- 0.002 (7/7) |
+| `small_old_lr` | balanced | 0.786 +/- 0.005 / 0.767 / 0.122 | +0.000 +/- 0.001 (3/7) |
+| `frozen_old` | balanced | 0.785 +/- 0.005 / 0.755 / 0.118 | +0.001 +/- 0.001 (6/7) |
+| Strategy B | balanced | 0.776 +/- 0.003 / 0.725 / 0.112 | +0.002 +/- 0.001 (7/7) |
+| Strategy B new | balanced | 0.781 +/- 0.004 / 0.732 / 0.118 | -0.001 +/- 0.002 (2/7) |
+| `ordinary_no_replay` | balanced | 0.203 +/- 0.000 / 0.889 / 0.901 | +0.028 +/- 0.000 (7/7) |
+| `ordinary` | shuffled | 0.610 +/- 0.072 / 0.858 / 0.370 | +0.020 +/- 0.039 (4/7) |
+| `small_old_lr` | shuffled | 0.625 +/- 0.020 / 0.925 / 0.394 | +0.005 +/- 0.032 (5/7) |
+| `frozen_old` | shuffled | 0.551 +/- 0.084 / 0.867 / 0.450 | -0.021 +/- 0.082 (2/7) |
+| Strategy B | shuffled | 0.658 +/- 0.009 / 0.924 / 0.363 | +0.002 +/- 0.006 (3/7) |
+| Strategy B new | shuffled | 0.546 +/- 0.021 / 0.525 / 0.340 | -0.018 +/- 0.016 (1/7) |
+| `ordinary_no_replay` | shuffled | 0.203 +/- 0.000 / 0.889 / 0.902 | +0.039 +/- 0.000 (7/7) |
 
-- **Balanced sampling is where rate choices are stable; shuffled results vary by seed.** With balanced sampling every strategy reaches 0.76-0.78 at a shared rate of 3. For `ordinary`, `small_old_lr` and `frozen_old`, a 4x larger cubic rate adds about 0.005-0.016 accuracy and about 0.03 newest-experience accuracy at unchanged forgetting; this agrees across three strategies and five seeds but is small, comes from one dataset and one projection, and for `ordinary` is within one standard deviation. Strategy B gains nothing. Shuffled sampling needs very large rates (10-30), and the seed spread (0.03-0.08) is as large as the differences between vectors, so no shuffled difference between vectors is established; the `[120, 120, 120, 120]` vector for Strategy B is a uniform rate, not a per-degree effect.
-- The earlier grid ended at 1 and every cell chose its upper edge; the grid now reaches 30 (a separate check, `results/per_degree/boundary_check_shared_rate*.json`, is kept). Per-degree vectors help much less once the shared rate is tuned, so the large gains seen against the old grid-edge reference were mostly a larger effective step.
-- **No strategy is shown optimal.** Under balanced sampling `ordinary`, `small_old_lr` and `frozen_old` differ by about 0.005 after tuning; Strategy B has the least forgetting among them but the weakest newest-experience accuracy.
-- **Strategy count.** The class-incremental code has five strategies (`ordinary`, `ordinary_no_replay`, `small_old_lr`, `frozen_old`, `strategy_b`). The eight of older branches were `ordinary_no_replay`, `ordinary`, `frozen_old`, `small_old_lr`, `strategy_a_all`, `strategy_a_new`, `strategy_b_all` and `strategy_b_new`; `main` removed the two Strategy A entries as identical to `ordinary` and `frozen_old`, leaving six distinct rules. Only `strategy_b_new` (constraint on the new coefficients only) has no class-incremental counterpart, and it was not added here.
-- Limits: factors 0.25 and 4 only, one-at-a-time perturbations plus one greedy follow-up, 3 epochs, one dataset and projection, selection on two validation seeds, and a seed spread that understates dataset variability.
+- **Under balanced sampling, per-degree vectors are not worth more than a tuned shared rate.** The validation-selected vector changed test accuracy by -0.004 to +0.005 (for the five strategies with replay), and by -0.001 to +0.003 at 10 epochs. Four of the five were better on all seven seeds, but by 0.003-0.005, about one seed standard deviation, and two cells (`small_old_lr`, Strategy B new) were worse on all seven seeds, so the validation choice does not reliably transfer. The earlier suggestion that a larger cubic rate helps (+0.005 to +0.016) was not confirmed by this wider protocol (three selection seeds, four factors, seven test seeds).
+- **Shuffled sampling needs very large rates and is noisy.** Selected vectors raise accuracy by 0.005-0.058 in five of six cells, mostly by making some or all groups larger than the grid maximum of 30 (an effectively uniform larger rate, e.g. `[120, 120, 120, 60]`), but the seed spread is 0.03-0.08 and the gain is not carried over to 10 epochs (-0.021 to +0.020, never better on more than five of seven seeds).
+- **The selection rule can reward rigidity.** For Strategy B new with shuffled sampling it chose a vector with forgetting 0.167 but newest-experience accuracy 0.116 (shared: 0.353), worse on all seven seeds. For `ordinary_no_replay` there is nothing to protect, so the gain from smaller rates (+0.035 at accuracy 0.22) is not meaningful. The `--min-current-accuracy` floor exists for this case and was not used.
+- **Strategies are close once rates are tuned.** With balanced sampling the five replay-based rules reach 0.764-0.780 (3 epochs) and 0.776-0.786 (10 epochs) at their best shared rate, with forgetting 0.09-0.12; `small_old_lr` and `frozen_old` are highest by 0.005-0.015, and the Strategy B variants have the weakest newest-experience accuracy at default rates. These gaps are small relative to the cross-seed spread, so **no strategy is shown optimal**. Strategy B new freezes old coefficients and keeps the null-space guarantee: at the default rate it forgets less than Strategy B (0.336 against 0.405 with shuffled sampling) but learns the newest classes worse (0.496 against 0.683).
+- **Strategy count.** The class-incremental code now has all six distinct rules of the older eight-strategy list (`strategy_a_all` and `strategy_a_new` were removed from `main` as identical to `ordinary` and `frozen_old`): `ordinary`, `ordinary_no_replay`, `small_old_lr`, `frozen_old`, `strategy_b` (the binary `strategy_b_all`) and `strategy_b_new`.
+- Limits: one dataset and projection, 3 and 10 epochs, one-group-at-a-time perturbations plus one greedy follow-up (no joint search over groups), factors 0.25-4, and a seed spread that understates dataset variability. The study was run on two machines (nine cells here, three locally, same code apart from a float32 tolerance), which can differ in the last digits.
 
 ### Supporting binary sinusoid (five seeds, 300 epochs, shared rate lr 0.5)
 
