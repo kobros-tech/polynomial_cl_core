@@ -82,6 +82,17 @@ MEMORY_PER_CLASS = 200
 EXPANSION_TOLERANCE = 1e-5
 
 
+def expansion_tolerance(logits):
+    """Allowed logit change when zero coefficients are appended.
+
+    Appending zeros is exact in real arithmetic; in float32 the same logits are summed with a
+    different matrix shape, so rounding grows with their magnitude (large learning rates give
+    large logits). The bound is EXPANSION_TOLERANCE for logits of order 1 and relative above
+    that, which still rejects any non-zero new coefficient.
+    """
+    return EXPANSION_TOLERANCE * max(1.0, float(np.max(np.abs(logits))))
+
+
 class FeatureData(NamedTuple):
     """Degree-``MAX_DEGREE`` design matrices; lower degrees are column prefixes of these."""
 
@@ -335,7 +346,7 @@ def run_condition(
             before = probe[:, : weights.shape[0]] @ weights
             weights = expand_weights(weights, count)
             change = float(np.max(np.abs(probe @ weights - before)))
-            if change > EXPANSION_TOLERANCE:
+            if change > expansion_tolerance(before):
                 raise RuntimeError(
                     f"zero-initialized expansion changed logits by {change}"
                 )

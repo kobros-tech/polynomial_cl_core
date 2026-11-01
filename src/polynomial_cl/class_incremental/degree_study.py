@@ -35,6 +35,7 @@ reported; ``selected`` is a convenience for plots, not a claim of optimality.
 
 from __future__ import annotations
 
+import time
 import warnings
 
 import numpy as np
@@ -58,12 +59,16 @@ SELECTION_METRICS = ("final_mean_accuracy", "mean_forgetting", "final_current_ac
 TRADEOFF_METRICS = (*STRATEGY_METRICS, "final_current_accuracy")
 
 
-def _run_seeds(data, seeds, strategy, rates, *, sampling, settings):
-    """Run one strategy with one learning-rate setting for every seed (paired plans)."""
+def _run_seeds(data, seeds, strategy, rates, *, sampling, settings, log=None, label=""):
+    """Run one strategy with one learning-rate setting for every seed (paired plans).
+
+    ``log`` (optional callable taking a string) receives one line per finished run.
+    """
     if not len(seeds):
         raise ValueError("at least one seed is required")
     runs = []
     for seed in seeds:
+        started = time.perf_counter()
         tasks, memory = make_task_plan(data.train_y, seed, settings["memory_per_class"])
         runs.append(
             run_condition(
@@ -80,6 +85,13 @@ def _run_seeds(data, seeds, strategy, rates, *, sampling, settings):
                 sampling=sampling,
             )
         )
+        if log:
+            run = runs[-1]
+            log(
+                f"    {label} seed {seed}: acc {run['final_mean_accuracy']:.3f} "
+                f"forg {run['mean_forgetting']:.3f} "
+                f"({time.perf_counter() - started:.1f}s)"
+            )
     return runs
 
 
@@ -149,6 +161,7 @@ def run_sampling_comparison(
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
+    log=None,
 ):
     """Same strategies, rate, seeds and replay memory under each sampling policy."""
     settings = _settings(epochs, batch_size, memory_per_class, n_ref_per_class)
@@ -158,7 +171,14 @@ def run_sampling_comparison(
             run
             for strategy in strategies
             for run in _run_seeds(
-                data, seeds, strategy, learning_rate, sampling=policy, settings=settings
+                data,
+                seeds,
+                strategy,
+                learning_rate,
+                sampling=policy,
+                settings=settings,
+                log=log,
+                label=f"[{policy}/{strategy}]",
             )
         ]
         out[policy] = {
@@ -216,6 +236,7 @@ def select_rate_vectors(
     shared_grid=SHARED_RATE_GRID,
     factors=RATE_FACTORS,
     min_current_accuracy=None,
+    log=None,
 ):
     """Stages 1-3 on validation data for one (strategy, sampling) cell.
 
@@ -224,7 +245,14 @@ def select_rate_vectors(
     """
     settings = _settings(epochs, batch_size, memory_per_class, n_ref_per_class)
 
-    def measure(rates):
+    tag = f"[{strategy}/{sampling}]"
+
+    def say(message):
+        if log:
+            log(message)
+
+    def measure(rates, what):
+        say(f"  {tag} validation: {what}")
         runs = _run_seeds(
             validation_data,
             selection_seeds,
@@ -232,22 +260,33 @@ def select_rate_vectors(
             rates,
             sampling=sampling,
             settings=settings,
+            log=log,
+            label=what,
         )
-        return {m: mean_metric(runs, m) for m in SELECTION_METRICS}
+        result = {m: mean_metric(runs, m) for m in SELECTION_METRICS}
+        say(
+            f"    -> acc {result['final_mean_accuracy']:.3f} "
+            f"forg {result['mean_forgetting']:.3f} "
+            f"newest {result['final_current_accuracy']:.3f}"
+        )
+        return result
 
-    grid = {float(lr): measure(float(lr)) for lr in shared_grid}
+    say(f"{tag} stage 1: shared-rate grid {list(shared_grid)}")
+    grid = {float(lr): measure(float(lr), f"shared lr={lr:g}") for lr in shared_grid}
     base = choose_candidate({str(k): v for k, v in grid.items()}, min_current_accuracy)
     base = float(base)
     vectors = candidate_vectors(base, factors)
     metrics = {"shared": grid[base]}
+    say(f"{tag} stage 2: base rate {base:g}, {len(vectors) - 1} one-group vectors")
     for name, vector in vectors.items():
         if name != "shared":
-            metrics[name] = measure(vector)
+            metrics[name] = measure(vector, f"{name} {vector}")
     scores = {name: tradeoff_score(m) for name, m in metrics.items()}
     combined = combine_best_directions(base, scores, factors)
     if combined != vectors["shared"] and combined not in vectors.values():
         vectors["combined"] = combined
-        metrics["combined"] = measure(combined)
+        say(f"{tag} stage 3: follow-up vector")
+        metrics["combined"] = measure(combined, f"combined {combined}")
         scores["combined"] = tradeoff_score(metrics["combined"])
     return {
         "shared_grid": {str(k): v for k, v in grid.items()},
@@ -272,20 +311,25 @@ def evaluate_vectors(
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
+    log=None,
 ):
     """Run every named vector on the test data; returns name -> list of run records."""
     settings = _settings(epochs, batch_size, memory_per_class, n_ref_per_class)
-    return {
-        name: _run_seeds(
+    out = {}
+    for i, (name, vector) in enumerate(vectors.items(), 1):
+        if log:
+            log(f"  [{strategy}/{sampling}] test {i}/{len(vectors)}: {name} {vector}")
+        out[name] = _run_seeds(
             test_data,
             test_seeds,
             strategy,
             vector,
             sampling=sampling,
             settings=settings,
+            log=log,
+            label=name,
         )
-        for name, vector in vectors.items()
-    }
+    return out
 
 
 def run_per_degree_study(
@@ -298,6 +342,7 @@ def run_per_degree_study(
     samplings=("shuffled", "class_balanced"),
     progress=None,
     min_current_accuracy=None,
+    log=None,
     **settings,
 ):
     """Selection on validation data, then test evaluation, for every (strategy, sampling).
@@ -319,6 +364,7 @@ def run_per_degree_study(
                 strategy,
                 sampling,
                 min_current_accuracy=min_current_accuracy,
+                log=log,
                 **settings,
             )
             runs = evaluate_vectors(
@@ -327,6 +373,7 @@ def run_per_degree_study(
                 strategy,
                 sampling,
                 selection["vectors"],
+                log=log,
                 **settings,
             )
             cell = {
@@ -415,6 +462,7 @@ def run_epoch_robustness(
     n_ref_per_class=N_REF_PER_CLASS,
     strategies=None,
     samplings=None,
+    log=None,
 ):
     """Re-run the shared reference and the selected vector of every cell at another epoch count.
 
@@ -443,6 +491,7 @@ def run_epoch_robustness(
             batch_size=batch_size,
             memory_per_class=memory_per_class,
             n_ref_per_class=n_ref_per_class,
+            log=log,
         )
         cells.append(
             {

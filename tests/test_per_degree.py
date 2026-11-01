@@ -714,3 +714,49 @@ def test_epoch_robustness_reuses_selected_vectors_without_reselecting(tiny_data)
     assert all(r["seed"] in (1, 2) for runs in cell["runs"].values() for r in runs)
     with pytest.raises(ValueError, match="selection seeds"):
         run_epoch_robustness(tiny_data, study, 2, test_seeds=[0])
+
+
+def test_expansion_tolerance_scales_with_logit_size_but_still_rejects_nonzero_growth(
+    tiny_data, monkeypatch
+):
+    from polynomial_cl.class_incremental import experiment as experiment_module
+    from polynomial_cl.class_incremental.experiment import (
+        EXPANSION_TOLERANCE,
+        expansion_tolerance,
+    )
+
+    assert expansion_tolerance(np.full((2, 2), 0.3)) == EXPANSION_TOLERANCE
+    assert expansion_tolerance(np.array([[-400.0, 3.0]])) == pytest.approx(
+        400 * EXPANSION_TOLERANCE
+    )
+    # float32 rounding of large logits (> 1e-5 absolute) is accepted ...
+    assert 1.2e-5 <= expansion_tolerance(np.array([[100.0]]))
+    # ... but a genuinely non-zero new coefficient is not
+    real_expand = experiment_module.expand_weights
+
+    def bad_expand(weights, count):
+        out = real_expand(weights, count)
+        out[weights.shape[0] :] = 0.5
+        return out
+
+    monkeypatch.setattr(experiment_module, "expand_weights", bad_expand)
+    with pytest.raises(RuntimeError, match="zero-initialized expansion"):
+        _run(tiny_data, learning_rate=0.5)
+
+
+def test_progress_log_reports_stages_and_every_run(tiny_data):
+    lines = []
+    run_per_degree_study(
+        tiny_data, tiny_data, [0], [1], strategies=("ordinary",), samplings=("shuffled",),
+        epochs=1, batch_size=16, memory_per_class=4, n_ref_per_class=1, log=lines.append,
+    )  # fmt: skip
+    text = "\n".join(lines)
+    for expected in (
+        "stage 1",
+        "stage 2",
+        "validation:",
+        "test 1/",
+        "seed 0:",
+        "seed 1:",
+    ):
+        assert expected in text

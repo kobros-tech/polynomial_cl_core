@@ -91,6 +91,10 @@ def main():
         "memory_per_class": args.memory_per_class,
         "n_ref_per_class": args.n_ref_per_class,
     }
+
+    def log(message):
+        print(message, flush=True)
+
     protocol = {**vars(args), "output": str(args.output), **data_settings}
     if args.experiment == "sampling":
         data = make_feature_data(train_x, train_y, test_x, test_y)
@@ -100,6 +104,7 @@ def main():
             policies=args.samplings,
             strategies=args.strategies,
             learning_rate=args.lr,
+            log=log,
             **settings,
         )
     elif args.experiment == "epochs":
@@ -115,6 +120,7 @@ def main():
             n_ref_per_class=args.n_ref_per_class,
             strategies=args.strategies,
             samplings=args.samplings,
+            log=log,
         )
     else:
         fit = holdout_split(train_x, train_y, args.validation_fraction)
@@ -126,6 +132,7 @@ def main():
             strategies=args.strategies,
             samplings=args.samplings,
             min_current_accuracy=args.min_current_accuracy,
+            log=log,
             progress=lambda c: print(
                 f"{c['sampling']:15s} {c['strategy']:20s} base={c['base_rate']:g} "
                 f"selected={c['selected']} pareto={c['pareto']}",
