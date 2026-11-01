@@ -50,3 +50,49 @@ def test_correctness_grid_categories_with_known_models():
     all_one = PolynomialLogisticModel(1, [1.0, 0.0, 0.0])
     _, _, cat = P.correctness_grid(all_one, 50)
     assert set(np.unique(cat)) <= {1, 2}  # only TP or FP possible
+
+
+def test_class_incremental_plots_run_and_do_not_change_the_runs():
+    import copy
+
+    from polynomial_cl.class_incremental import (
+        make_feature_data,
+        make_synthetic_2d,
+        make_task_plan,
+        run_condition,
+    )
+
+    x, y, tx, ty, _ = make_synthetic_2d(
+        1, n_train_per_class=10, n_test_per_class=5, separation=3.0, noise=0.2
+    )
+    data = make_feature_data(x, y, tx, ty)
+    tasks, memory = make_task_plan(data.train_y, 0, 3)
+    runs = {
+        policy: [
+            run_condition(
+                "expanding", data, tasks, memory, seed=s, epochs=1, batch_size=8,
+                learning_rate=[0.1, 0.2, 0.05, 0.1], sampling=policy,
+            )
+            for s in (0, 1)
+        ]
+        for policy in ("shuffled", "class_balanced")
+    }  # fmt: skip
+    snapshot = copy.deepcopy(runs)
+    P.plot_cil_accuracy_over_experiences(runs)
+    P.plot_cil_forgetting(runs)
+    P.plot_cil_takeover_flips(runs)
+    P.plot_cil_tradeoff(
+        [{"label": k, "runs": v, "sampling": k} for k, v in runs.items()]
+    )
+    P.plot_cil_accuracy_matrix(runs["shuffled"])
+    for key in ("coef_change_l1", "mean_step_l1", "logit_contribution", "logit_change"):
+        P.plot_degree_diagnostic(runs["shuffled"], key)
+    vectors = {"shared": [0.1] * 4, "d1x4": [0.1, 0.4, 0.1, 0.1]}
+    P.plot_rate_vectors_with_results(
+        vectors, {n: runs["shuffled"] for n in vectors}, "shared"
+    )
+    P.plot_sampling_counts(
+        {k: [r["sampling_by_task"][0] for r in v][:1] for k, v in runs.items()}
+    )
+    plt.close("all")
+    assert runs == snapshot
