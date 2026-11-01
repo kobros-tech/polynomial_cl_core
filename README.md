@@ -104,7 +104,8 @@ Two further mechanisms are available for every update rule (`polynomial_cl.class
 
 ```bash
 python experiments/per_degree_lr.py --dataset split_mnist --experiment sampling --output results/per_degree/sampling_e3_lr0.1.json
-# one JSON per (strategy, sampling), about 2.5 minutes each (strategy_b longer); notebook 02 merges cell_*.json
+# one JSON per (strategy, sampling); notebook 02 merges cell_*.json. The whole study, resumable (skips finished cells):
+bash experiments/run_per_degree_study.sh
 python experiments/per_degree_lr.py --dataset split_mnist --experiment per-degree --strategies ordinary --samplings class_balanced --output results/per_degree/cell_ordinary_class_balanced.json
 ```
 
