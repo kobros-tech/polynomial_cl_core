@@ -153,11 +153,16 @@ INDICATORS = (
     "train_loss_by_task",  # [loss before, loss after] on this experience's training set (+ replay)
     "l1_update_by_task",  # sum |w_after - w_before| over the coefficients used this experience
     "n_trainable_by_task",  # coefficients that may change (B: rank of sqrt(D) N, x classes)
-    "null_dim_by_task",  # strategy_b only: dimension left free by the constraint
+    # Strategy B variants only. Dimension of the null-space basis that constrains the OLD-class
+    # output columns (for strategy_b one shared basis for every column; for strategy_b_new the
+    # basis restricted to the newly added feature rows) and the NEW-class columns. None in
+    # experience 1 (nothing to preserve) and for every other rule.
+    "null_dim_by_task",
+    "null_dim_new_class_columns_by_task",
     "old_logit_change_by_task",  # max change of old-class logits on old-class test inputs
     "old_flip_fraction_by_task",  # old-class test inputs whose prediction among old classes changed
     "old_takeover_fraction_by_task",  # old-class test inputs now predicted as a NEW class
-    "ref_logit_change_by_task",  # strategy_b only: max logit change at the reference inputs
+    "ref_logit_change_by_task",  # Strategy B variants: max logit change at the reference inputs
 )
 
 
@@ -201,8 +206,14 @@ def _record_indicators(
             allowed &= (np.asarray(step_scale)[:count] > 0)[:, None]
         trainable = int(allowed.sum())
     out["n_trainable_by_task"].append(int(trainable))
-    kept = null_groups[0][1] if null_groups is not None else null_basis
-    out["null_dim_by_task"].append(None if kept is None else int(kept.shape[1]))
+    if null_groups is not None:  # strategy_b_new: separate bases per column group
+        old_dim, new_dim = (int(basis.shape[1]) for _, basis in null_groups)
+    elif null_basis is not None:  # strategy_b: one basis shared by every column
+        old_dim = new_dim = int(null_basis.shape[1])
+    else:
+        old_dim = new_dim = None
+    out["null_dim_by_task"].append(old_dim)
+    out["null_dim_new_class_columns_by_task"].append(new_dim)
     if task:
         x = data.test_x[old_test, :count]
         old_before, old_after = (

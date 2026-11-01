@@ -760,3 +760,27 @@ def test_progress_log_reports_stages_and_every_run(tiny_data):
         "seed 1:",
     ):
         assert expected in text
+
+
+def test_strategy_b_variants_report_both_null_space_dimensions(tiny_data):
+    shared = _run(tiny_data, "strategy_b", n_ref_per_class=1)
+    assert shared["null_dim_by_task"][0] is None
+    assert shared["null_dim_new_class_columns_by_task"][0] is None
+    # strategy_b uses one basis for every column, so the two reported dimensions agree
+    assert (
+        shared["null_dim_by_task"][1:]
+        == shared["null_dim_new_class_columns_by_task"][1:]
+    )
+    new = _run(tiny_data, "strategy_b_new", n_ref_per_class=1)
+    old_dim, new_dim = (
+        new["null_dim_by_task"],
+        new["null_dim_new_class_columns_by_task"],
+    )
+    assert old_dim[0] is None and new_dim[0] is None
+    # experiences 4 and 5 add no feature rows: nothing is left for the old-class outputs,
+    # while the new classes' columns keep a free subspace
+    assert old_dim[3] == old_dim[4] == 0
+    assert new_dim[3] > 0 and new_dim[4] > 0
+    for other in ("ordinary", "frozen_old"):
+        run = _run(tiny_data, other)
+        assert all(v is None for v in run["null_dim_new_class_columns_by_task"])

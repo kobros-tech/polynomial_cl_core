@@ -81,7 +81,7 @@ python experiments/class_incremental.py --dataset split_mnist --experiment strat
 python experiments/class_incremental.py --dataset split_mnist --experiment strategies --n-ref-per-class 10 --output results/split_mnist_b10.json
 ```
 
-Every record carries learning indicators that exist for _all_ rules: training loss before and after each experience, L1 size of the update, number of trainable coefficients, and the old-class change, flip and takeover diagnostics above. `null_dim` exists only for Strategy B and is a constraint diagnostic, not a general learning indicator.
+Every record carries learning indicators that exist for _all_ rules: training loss before and after each experience, L1 size of the update, number of trainable coefficients, and the old-class change, flip and takeover diagnostics above. `null_dim` exists only for the two Strategy B variants and is a constraint diagnostic, not a general learning indicator. It is the free dimension for the old-class output columns (`strategy_b`: one basis shared by every column; `strategy_b_new`: the dimension left in the newly added feature rows, which is 0 in an experience that adds none), and `null_dim_new_class_columns` is the free dimension for the new classes' columns. `n_trainable` counts the directions that can actually move after the learning-rate vector is applied (zero-rate groups excluded).
 
 ### Per-feature learning rates and validated rate selection
 
