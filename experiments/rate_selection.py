@@ -13,15 +13,15 @@ import argparse
 import json
 from pathlib import Path
 
-from class_incremental import add_dataset_arguments, load_dataset
+from common import add_dataset_arguments, load_dataset
 
-from polynomial_cl.class_incremental import (
+from polynomial_cl.continual import (
     holdout_split,
     make_feature_data,
     run_comparison,
     run_strategy_comparison,
 )
-from polynomial_cl.class_incremental.experiment import (
+from polynomial_cl.continual.experiment import (
     EPOCHS,
     MEMORY_PER_CLASS,
     N_REF_PER_CLASS,

@@ -18,9 +18,8 @@ import argparse
 import json
 from pathlib import Path
 
-from polynomial_cl.data import make_experiences
+from polynomial_cl.binary import make_config, make_experiences, run_continual
 from polynomial_cl.metrics import mean_std_by_condition
-from polynomial_cl.training import make_config, run_continual
 
 METRICS = ("final_mean_accuracy", "final_current_accuracy", "final_mean_forgetting")
 

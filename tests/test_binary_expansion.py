@@ -4,9 +4,9 @@
 import numpy as np
 import pytest
 
-from polynomial_cl.data import make_experiences
-from polynomial_cl.model import PolynomialLogisticModel
-from polynomial_cl.training import make_config, run_continual
+from polynomial_cl.binary.data import make_experiences
+from polynomial_cl.binary.experiment import make_config, run_continual
+from polynomial_cl.models.binary import PolynomialLogisticModel
 
 
 @pytest.fixture(scope="module")
@@ -76,3 +76,43 @@ def test_continual_loop_verifies_invariant_every_step(exps):
             r.model_before.score(exps[0].test.x),
             atol=1e-10,
         )
+
+
+def test_seed_summary_rows_step_rows_and_sequential_curves():
+    import matplotlib.pyplot as plt
+
+    from polynomial_cl.binary import run_seeds, seed_summary_rows, step_rows
+    from polynomial_cl.plotting import synthetic as P
+
+    data = {"n_train": 40, "n_test": 40, "n_experiences": 4}
+    runs = {
+        name: run_seeds([0, 1], make_config(name, epochs=20, m_current=20, m_replay=20, capacity=30), data)
+        for name in ("ordinary", "strategy_b_new")
+    }  # fmt: skip
+    rows = seed_summary_rows(runs, key="strategy")
+    assert [r["strategy"] for r in rows] == ["ordinary", "strategy_b_new"]
+    assert rows[0]["null_dim_last"] == "n/a" and rows[1]["null_dim_last"] != "n/a"
+    last = [r.records[-1].mean_acc for r in runs["ordinary"]]
+    assert (
+        rows[0]["final_mean_acc"] == f"{np.mean(last):.3f}+/-{np.std(last, ddof=1):.3f}"
+    )
+    steps = step_rows(runs["strategy_b_new"][0])
+    assert [s["exp"] for s in steps] == [1, 2, 3, 4]
+    assert (
+        abs(steps[-1]["ref_score_change"]) < 1e-9
+    )  # the constraint's defining property
+    axs = P.plot_sequential_curves(runs)
+    assert len(axs[0].get_lines()) == 2
+    plt.close(axs[0].figure)
+
+
+def test_config_with_defaults_lets_a_preset_keep_its_defining_fields():
+    from polynomial_cl.binary import config_with_defaults
+
+    shared = {"lr": 0.3, "epochs": 25, "m_replay": 50, "capacity": 80}
+    no_replay = config_with_defaults("ordinary_no_replay", shared)
+    assert no_replay.m_replay == 0 and no_replay.lr == 0.3 and no_replay.epochs == 25
+    ordinary = config_with_defaults("ordinary", shared, seed=4)
+    assert ordinary.m_replay == 50 and ordinary.seed == 4
+    with pytest.raises(ValueError, match="defines"):
+        config_with_defaults("ordinary_no_replay", shared, m_replay=10)

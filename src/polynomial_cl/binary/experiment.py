@@ -1,22 +1,19 @@
 # Copyright (c) 2026 Mohamed Alkobrosli
 # SPDX-License-Identifier: MIT
 
-"""Gradient-descent training, expansion-aware continual learning loop, and Strategy B.
+"""Expansion-aware sequential binary learning loop and its update strategies (NumPy only).
 
-Everything here is plain NumPy. Key ideas
------------------------------------------
-* `train` supports a global or per-coefficient learning rate, a boolean trainable mask
-  (frozen coefficients are never touched; this is asserted), shuffled mini-batches with an
-  explicit seed, an optional fixed `offset` score (used to represent f = f_old + g), and an
-  optional `null_basis` that restricts every update to a subspace.
-* Strategy B represents f_t = f_old + g_t.  f_old is the (expanded) previous model and is
-  never modified.  g_t starts at zero.  Two variants are distinguished explicitly:
+Strategy B represents f_t = f_old + g_t.  f_old is the (expanded) previous model and is
+never modified.  g_t starts at zero.  Two variants are distinguished explicitly:
     A. frozen old component  : g is unconstrained (the old *function* is untouched but the
                                combined predictions may change anywhere).
     B. preserved predictions : g(x_i) = 0 is enforced exactly on reference inputs x_i by
                                restricting g's coefficients to the null space of the
                                reference design matrix.  This preserves f_old at those
                                finitely many inputs only; nothing is guaranteed elsewhere.
+
+The optimiser itself is ``polynomial_cl.training.binary.train``. This loop belongs to the
+binary setting (fixed label set, spatially shifting inputs) and is not class-incremental.
 """
 
 from __future__ import annotations
@@ -26,174 +23,18 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from .data import DOMAIN, Experience
-from .features import n_features, polynomial_features
-from .metrics import (
+from ..data.synthetic import DOMAIN
+from ..metrics import (
     accuracy,
     forgetting,
     old_score_change,
     parameter_changes,
     prediction_flip_fraction,
 )
-from .model import (
-    PolynomialLogisticModel,
-    bce_with_logits,
-    check_expansion_invariant,
-    sigmoid,
-)
+from ..models.binary import PolynomialLogisticModel, check_expansion_invariant
+from ..training.binary import positive_int, preservation_null_basis, train
+from .data import Experience, combine_splits, make_experiences
 from .replay import ReplayBuffer, build_batch
-
-
-# ============================================================ basic training
-@dataclass
-class TrainResult:
-    model: PolynomialLogisticModel
-    loss_history: np.ndarray  # loss before training, then after every epoch
-    w_before: np.ndarray
-    w_after: np.ndarray
-    lr_vector: np.ndarray  # effective per-coefficient learning rate (0 if frozen)
-    trainable: np.ndarray  # boolean mask
-
-
-def _as_vector(lr, n):
-    values = np.asarray(lr, dtype=float)
-    if values.ndim == 0:
-        values = np.full(n, float(values))
-    elif values.shape != (n,):
-        raise ValueError(
-            f"lr must be a scalar or have shape ({n},), got {values.shape}"
-        )
-    if not np.all(np.isfinite(values)) or np.any(values < 0):
-        raise ValueError("learning rates must be finite and non-negative")
-    return values.copy()
-
-
-def _positive_int(value, name, *, allow_zero=False):
-    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-        raise TypeError(f"{name} must be an integer")
-    minimum = 0 if allow_zero else 1
-    if value < minimum:
-        qualifier = "non-negative" if allow_zero else "positive"
-        raise ValueError(f"{name} must be {qualifier}")
-    return int(value)
-
-
-def train(
-    model,
-    x,
-    y,
-    lr=0.5,
-    epochs=100,
-    batch_size=None,
-    seed=0,
-    trainable=None,
-    offset=None,
-    null_basis=None,
-) -> TrainResult:
-    """Gradient descent on mean BCE. The input model is not modified; a trained copy is returned.
-
-    lr         scalar or per-coefficient vector (eta_i). Frozen coefficients get eta_i = 0.
-    batch_size None = full batch; otherwise shuffled mini-batches (reshuffled every epoch,
-               RNG = default_rng(seed)).
-    offset     fixed per-sample score added to the model score (f = offset + w.phi(x)).
-    null_basis (n_coef, k) matrix; each update step is projected onto its column space.
-    """
-    x = np.asarray(x, dtype=float)
-    y = np.asarray(y, dtype=float)
-    if x.ndim != 2 or len(x) == 0:
-        raise ValueError("x must be a non-empty 2D array")
-    if y.shape != (len(x),) or not np.all(np.isfinite(y)):
-        raise ValueError("y must be a finite 1D array with one label per row of x")
-    if not np.all(np.isin(y, [0.0, 1.0])):
-        raise ValueError("y must contain only binary labels 0 and 1")
-    epochs = _positive_int(epochs, "epochs", allow_zero=True)
-    n_coef = model.n_features
-    mask = (
-        np.ones(n_coef, bool)
-        if trainable is None
-        else np.asarray(trainable, bool).copy()
-    )
-    if mask.shape != (n_coef,):
-        raise ValueError(f"trainable must have shape ({n_coef},)")
-    raw_lr = _as_vector(lr, n_coef)
-    if null_basis is not None:
-        null_basis = np.asarray(null_basis, dtype=float)
-        if null_basis.ndim != 2 or null_basis.shape[0] != n_coef:
-            raise ValueError(f"null_basis must have shape ({n_coef}, k)")
-        if not np.all(np.isfinite(null_basis)):
-            raise ValueError("null_basis must contain only finite values")
-        if not np.allclose(
-            null_basis.T @ null_basis, np.eye(null_basis.shape[1]), atol=1e-8
-        ):
-            raise ValueError("columns of null_basis must be orthonormal")
-        # The trainer guarantees bit-for-bit preservation of frozen coefficients.
-        # Therefore the projection basis must be exactly zero in those coordinates;
-        # even tiny nonzero entries could otherwise move a frozen coefficient.
-        if np.any(null_basis[~mask] != 0.0):
-            raise ValueError(
-                "null_basis must have exactly zero rows for frozen coefficients"
-            )
-        active = mask & np.any(np.abs(null_basis) > 1e-12, axis=1)
-        active_rates = raw_lr[active]
-        if active_rates.size and not np.allclose(active_rates, active_rates[0]):
-            raise ValueError(
-                "null_basis constraints require one shared learning rate across "
-                "all trainable coefficients represented in the null space"
-            )
-    lr_vec = raw_lr * mask
-    off = np.zeros(len(y)) if offset is None else np.asarray(offset, dtype=float)
-    if off.shape != (len(y),) or not np.all(np.isfinite(off)):
-        raise ValueError("offset must be a finite 1D array with one value per sample")
-    phi = model.design(x)
-    w0 = model.w.copy()
-    w = w0.copy()
-    rng = np.random.default_rng(seed)
-    n = len(y)
-    bs = n if batch_size is None else _positive_int(batch_size, "batch_size")
-
-    def full_loss():
-        return bce_with_logits(off + phi @ w, y)
-
-    hist = [full_loss()]
-    for _ in range(int(epochs)):
-        order = rng.permutation(n) if bs < n else np.arange(n)
-        for s in range(0, n, bs):
-            idx = order[s : s + bs]
-            err = sigmoid(off[idx] + phi[idx] @ w) - y[idx]
-            grad = phi[idx].T @ err / len(idx)
-            step = lr_vec * grad
-            if null_basis is not None:
-                step = null_basis @ (null_basis.T @ step)
-            w -= step
-        hist.append(full_loss())
-    assert np.array_equal(w[~mask], w0[~mask]), "a frozen coefficient changed"
-    return TrainResult(
-        PolynomialLogisticModel(model.degree, w), np.array(hist), w0, w, lr_vec, mask
-    )
-
-
-# ================================================== preservation constraint (B)
-def preservation_null_basis(degree, x_ref, trainable=None, rtol=1e-10):
-    """Orthonormal basis N (n_coef, k) of {v : Phi(x_ref) v = 0, v_i = 0 for frozen i}.
-
-    Any g with coefficients v = N z satisfies g(x_ref) = 0 exactly (to rounding). If the
-    constraints use up all degrees of freedom, k = 0 and g cannot learn anything - that is
-    a result to report, not something to repair.
-    """
-    n = n_features(degree)
-    mask = np.ones(n, bool) if trainable is None else np.asarray(trainable, bool)
-    cols = np.flatnonzero(mask)
-    x_ref = np.atleast_2d(x_ref)
-    if len(x_ref) == 0 or len(cols) == 0:
-        basis_t = np.eye(len(cols))
-    else:
-        a = polynomial_features(x_ref, degree)[:, cols]
-        _, s, vt = np.linalg.svd(a, full_matrices=True)
-        rank = int(np.sum(s > rtol * max(s[0], 1.0))) if len(s) else 0
-        basis_t = vt[rank:].T
-    basis = np.zeros((n, basis_t.shape[1]))
-    basis[cols, :] = basis_t
-    return basis
 
 
 # ============================================================ continual loop
@@ -247,6 +88,17 @@ def make_config(strategy="ordinary", **overrides) -> ContinualConfig:
             f"strategy '{strategy}' defines {sorted(clash)}; do not override them"
         )
     return ContinualConfig(name=strategy, **{**STRATEGIES[strategy], **overrides})
+
+
+def config_with_defaults(strategy, defaults, **overrides) -> ContinualConfig:
+    """``make_config`` where a preset's defining fields win over the shared ``defaults``.
+
+    The shared settings only fill what the preset does not define (e.g. ``m_replay`` is not
+    taken from ``defaults`` for ``ordinary_no_replay``); explicit ``overrides`` still may not
+    touch a defining field.
+    """
+    shared = {k: v for k, v in defaults.items() if k not in STRATEGIES[strategy]}
+    return make_config(strategy, **shared, **overrides)
 
 
 @dataclass
@@ -326,15 +178,15 @@ def run_continual(
         raise ValueError(
             "lr_feature_power needs one shared rate; incompatible with preserve"
         )
-    _positive_int(cfg.epochs, "epochs", allow_zero=True)
-    _positive_int(cfg.capacity, "capacity")
-    _positive_int(cfg.m_current, "m_current")
-    _positive_int(cfg.m_replay, "m_replay", allow_zero=True)
-    _positive_int(cfg.n_ref_per_exp, "n_ref_per_exp", allow_zero=True)
+    positive_int(cfg.epochs, "epochs", allow_zero=True)
+    positive_int(cfg.capacity, "capacity")
+    positive_int(cfg.m_current, "m_current")
+    positive_int(cfg.m_replay, "m_replay", allow_zero=True)
+    positive_int(cfg.n_ref_per_exp, "n_ref_per_exp", allow_zero=True)
     if cfg.batch_size is not None:
-        _positive_int(cfg.batch_size, "batch_size")
+        positive_int(cfg.batch_size, "batch_size")
     if cfg.stop_after is not None:
-        _positive_int(cfg.stop_after, "stop_after")
+        positive_int(cfg.stop_after, "stop_after")
     K = (
         len(experiences)
         if cfg.stop_after is None
@@ -504,10 +356,135 @@ def run_continual(
 
 def run_seeds(seeds, cfg: ContinualConfig, data_kwargs=None):
     """Repeat one configuration over several seeds (data + replay + shuffling all depend on the seed)."""
-    from .data import make_experiences
-
     out = []
     for s in seeds:
         exps = make_experiences(seed=s, **(data_kwargs or {}))
         out.append(run_continual(exps, replace(cfg, seed=s)))
     return out
+
+
+def summary_table(result: ContinualResult):
+    """One row (dict) per processed experience of a binary continual run."""
+    rows = []
+    for r in result.records:
+        rows.append(
+            {
+                "exp": r.t + 1,
+                "degree": r.degree_after,
+                "trainable": r.n_trainable,
+                "final_loss": r.loss_history[-1],
+                "acc_current": r.acc_current,
+                "mean_acc": r.mean_acc,
+                "mean_forgetting": r.mean_forgetting,
+                "max_forgetting": r.max_forgetting,
+                "max_old_score_change": r.max_old_score_change,
+                "old_flip_frac": r.old_flip_fraction,
+                "frozen_max_change": r.frozen_max_change,
+                "preserved_component_max_change": r.preserved_component_max_change,
+                "combined_max_coefficient_change": r.combined_max_coefficient_change,
+                "trainable_L1_update": r.trainable_l1_update,
+            }
+        )
+    return rows
+
+
+def run_joint_study(experiences, degrees, epochs_list, lr, seed=0):
+    """Joint (non-continual) training of the binary model: one row per (degree, epochs).
+
+    The training samples of all experiences are pooled and each model is trained from scratch
+    on the same pool, with the same learning rate and seed; only the degree and the number of
+    full-batch epochs differ. Accuracy is measured on every experience's fixed test split.
+    There is no sequence of experiences here, so no forgetting is defined or reported.
+    """
+    x, y, _ = combine_splits([e.train for e in experiences])
+    rows = []
+    for degree in degrees:
+        for epochs in epochs_list:
+            result = train(
+                PolynomialLogisticModel(degree), x, y, lr=lr, epochs=epochs, seed=seed
+            )
+            accs = [
+                accuracy(e.test.y, result.model.predict(e.test.x)) for e in experiences
+            ]
+            rows.append(
+                {
+                    "degree": int(degree),
+                    "epochs": int(epochs),
+                    "n_features": result.model.n_features,
+                    "final_loss": float(result.loss_history[-1]),
+                    "mean_accuracy": float(np.mean(accs)),
+                    "min_accuracy": float(np.min(accs)),
+                    "accuracy_by_experience": accs,
+                    "loss_history": result.loss_history,
+                    "model": result.model,
+                }
+            )
+    return rows
+
+
+def _mean_std_text(values):
+    values = np.asarray(values, dtype=float)
+    std = values.std(ddof=1) if len(values) > 1 else 0.0
+    return f"{values.mean():.3f}+/-{std:.3f}"
+
+
+def seed_summary_rows(results_by_label, key="variant"):
+    """One table row per label from lists of runs over seeds (mean +/- sample std, ddof=1).
+
+    ``results_by_label`` maps a label to the ``ContinualResult`` of every seed. The columns are
+    the final mean accuracy, final accuracy on the newest and on the first experience, final
+    forgetting, the mean over experiences of the old-evaluation-set score change, and the
+    constrained dimension of the last experience (``n/a`` without a constraint).
+    """
+    rows = []
+    for label, results in results_by_label.items():
+        last = [r.records[-1] for r in results]
+        null_dim = last[0].null_dim
+        old_change = np.mean(
+            [[x.max_old_score_change for x in r.records[1:]] for r in results]
+        )
+        rows.append(
+            {
+                key: label,
+                "final_mean_acc": _mean_std_text([x.mean_acc for x in last]),
+                "final_acc_current": _mean_std_text([x.acc_current for x in last]),
+                "final_acc_E1": _mean_std_text([r.acc_matrix[-1, 0] for r in results]),
+                "final_mean_forgetting": _mean_std_text(
+                    [x.mean_forgetting for x in last]
+                ),
+                "mean_old_score_change": f"{old_change:.3f}",
+                "null_dim_last": "n/a" if null_dim is None else null_dim,
+            }
+        )
+    return rows
+
+
+def step_rows(result):
+    """Per-experience diagnostics of one run (loss reduction, trainable dimensions, constraint).
+
+    ``ref_score_change`` is the change at the reference inputs (about 1e-15 for Strategy B by
+    construction); ``old_score_change`` is measured on the whole old evaluation sets, which are
+    not the reference inputs. ``null_dim`` is only defined for a constrained update.
+    """
+    nan = float("nan")
+    return [
+        {
+            "exp": r.t + 1,
+            "degree": r.degree_after,
+            "null_dim": "n/a (unconstrained)" if r.null_dim is None else r.null_dim,
+            "trainable_dims": r.n_trainable,
+            "loss_reduction": float(r.loss_history[0] - r.loss_history[-1]),
+            "trainable_l1_update": r.trainable_l1_update,
+            "acc_current": r.acc_current,
+            "mean_acc": r.mean_acc,
+            "ref_score_change": nan
+            if r.ref_score_change is None
+            else r.ref_score_change,
+            "old_score_change(eval sets)": r.max_old_score_change,
+            "old_flip_frac": r.old_flip_fraction,
+            "frozen_change": nan
+            if r.frozen_max_change is None
+            else r.frozen_max_change,
+        }
+        for r in result.records
+    ]

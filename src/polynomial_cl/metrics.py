@@ -1,7 +1,14 @@
 # Copyright (c) 2026 Mohamed Alkobrosli
 # SPDX-License-Identifier: MIT
 
-"""Metrics for measuring learning and preservation (all computed identically for every method)."""
+"""Metrics for measuring learning and preservation (all computed identically for every method).
+
+``forgetting`` and ``mean_std_by_condition`` are used by both the binary and the
+class-incremental experiments; ``format_table`` prints result rows in the notebooks. The
+binary experiment additionally records ``accuracy``, ``old_score_change``,
+``prediction_flip_fraction`` and ``parameter_changes`` at every step. All of them are
+array-level measures that do not depend on a result or record type.
+"""
 
 from __future__ import annotations
 
@@ -10,11 +17,6 @@ import numpy as np
 
 def accuracy(y_true, y_pred) -> float:
     return float(np.mean(np.asarray(y_true) == np.asarray(y_pred)))
-
-
-def mean_observed_accuracy(acc_matrix, t) -> float:
-    """A_bar_t = mean_i A[t, i] over experiences 0..t (0-based t)."""
-    return float(np.mean(acc_matrix[t, : t + 1]))
 
 
 def old_score_change(score_before, score_after) -> float:
@@ -46,31 +48,6 @@ def parameter_changes(w_before, w_after, trainable_mask):
     m = np.asarray(trainable_mask, dtype=bool)
     frozen_max = float(d[~m].max()) if (~m).any() else None
     return frozen_max, float(d[m].sum())
-
-
-def summary_table(result):
-    """One row (dict) per processed experience."""
-    rows = []
-    for r in result.records:
-        rows.append(
-            {
-                "exp": r.t + 1,
-                "degree": r.degree_after,
-                "trainable": r.n_trainable,
-                "final_loss": r.loss_history[-1],
-                "acc_current": r.acc_current,
-                "mean_acc": r.mean_acc,
-                "mean_forgetting": r.mean_forgetting,
-                "max_forgetting": r.max_forgetting,
-                "max_old_score_change": r.max_old_score_change,
-                "old_flip_frac": r.old_flip_fraction,
-                "frozen_max_change": r.frozen_max_change,
-                "preserved_component_max_change": r.preserved_component_max_change,
-                "combined_max_coefficient_change": r.combined_max_coefficient_change,
-                "trainable_L1_update": r.trainable_l1_update,
-            }
-        )
-    return rows
 
 
 def mean_std_by_condition(rows, metric_names, key="condition"):

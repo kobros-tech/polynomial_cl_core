@@ -4,98 +4,23 @@
 import numpy as np
 import pytest
 
-from polynomial_cl.class_incremental.features import (
+from polynomial_cl.continual.features import (
     expand_weights,
 )
-from polynomial_cl.class_incremental.features import (
-    monomial_exponents as class_incremental_monomial_exponents,
+from polynomial_cl.continual.features import (
+    monomial_exponents as continual_monomial_exponents,
 )
 from polynomial_cl.features import (
-    PolynomialFeatures,
     append_zero_coefficients,
-    feature_exponents,
-    feature_names,
     monomial_exponents,
-    n_features,
-    polynomial_features,
+    validate_degree,
 )
-from polynomial_cl.model import PolynomialLogisticModel
-
-
-def test_names_degree_1_2_3():
-    assert feature_names(1) == ["1", "x1", "x2"]
-    assert feature_names(2) == ["1", "x1", "x2", "x1^2", "x1*x2", "x2^2"]
-    assert feature_names(3)[6:] == ["x1^3", "x1^2*x2", "x1*x2^2", "x2^3"]
-
-
-def test_ordering_is_deterministic_and_prefix_stable():
-    assert feature_names(6) == feature_names(6)
-    for d in range(9):
-        assert feature_names(d + 1)[: n_features(d)] == feature_names(d)
-
-
-@pytest.mark.parametrize("d", range(13))
-def test_feature_count(d):
-    assert n_features(d) == (d + 1) * (d + 2) // 2
-    assert len(feature_names(d)) == n_features(d)
-    assert polynomial_features(np.zeros((3, 2)), d).shape == (3, n_features(d))
-
-
-def test_known_values():
-    x = np.array([[2.0, 3.0]])
-    np.testing.assert_array_equal(polynomial_features(x, 2)[0], [1, 2, 3, 4, 6, 9])
-    np.testing.assert_array_equal(
-        polynomial_features(x, 3)[0], [1, 2, 3, 4, 6, 9, 8, 12, 18, 27]
-    )
-    np.testing.assert_array_equal(polynomial_features([-1.0, 0.5], 1)[0], [1, -1, 0.5])
-
-
-def test_wrapper_exposes_metadata():
-    f = PolynomialFeatures(4)
-    assert f.degree == 4 and f.n_features == 15 and f.names == feature_names(4)
-
-
-@pytest.mark.parametrize(
-    "degree, error",
-    [
-        (2.9, TypeError),
-        (True, TypeError),
-        (np.float64(3), TypeError),
-        (np.bool_(True), TypeError),
-        (-1, ValueError),
-    ],
-)
-def test_invalid_degree_is_rejected_consistently(degree, error):
-    with pytest.raises(error, match="degree"):
-        PolynomialFeatures(degree)
-    with pytest.raises(error, match="degree"):
-        feature_names(degree)
-    with pytest.raises(error, match="degree"):
-        n_features(degree)
-    with pytest.raises(error, match="degree"):
-        polynomial_features([[0.0, 0.0]], degree)
-
-
-def test_numpy_integer_degree_is_accepted():
-    assert PolynomialFeatures(np.int64(2)).degree == 2
+from polynomial_cl.models.binary import PolynomialLogisticModel
 
 
 # ----------------------------------------- shared by binary and class-incremental code
-def test_binary_exponents_are_the_two_variable_case_of_the_shared_enumeration():
-    assert feature_exponents(3) == [
-        (0, 0),
-        (1, 0), (0, 1),
-        (2, 0), (1, 1), (0, 2),
-        (3, 0), (2, 1), (1, 2), (0, 3),
-    ]  # fmt: skip
-    for degree in range(11):
-        shared = monomial_exponents(2, degree)
-        assert feature_exponents(degree) == [tuple(map(int, row)) for row in shared]
-        assert len(shared) == n_features(degree)
-
-
 def test_class_incremental_features_use_the_same_enumeration():
-    assert class_incremental_monomial_exponents is monomial_exponents
+    assert continual_monomial_exponents is monomial_exponents
     for n_variables in (1, 2, 5):
         for degree in range(4):
             small = monomial_exponents(n_variables, degree)
@@ -140,3 +65,47 @@ def test_binary_model_and_softmax_head_expand_through_the_same_helper():
     np.testing.assert_array_equal(
         expand_weights(head, 153), append_zero_coefficients(head, 153)
     )
+
+
+@pytest.mark.parametrize("degree", [0, 3, np.int64(2)])
+def test_validate_degree_accepts_non_negative_integers(degree):
+    assert validate_degree(degree) == int(degree)
+    assert type(validate_degree(degree)) is int
+
+
+@pytest.mark.parametrize(
+    "degree, error",
+    [
+        (2.9, TypeError),
+        (True, TypeError),
+        (np.bool_(True), TypeError),
+        (-1, ValueError),
+    ],
+)
+def test_validate_degree_rejects_everything_else(degree, error):
+    with pytest.raises(error, match="degree"):
+        validate_degree(degree)
+
+
+def test_zero_expansion_preserves_binary_and_multiclass_outputs():
+    """Outputs, not shapes: the same helper keeps both model types' predictions unchanged."""
+    from polynomial_cl.continual.features import scaled_polynomial_features
+    from polynomial_cl.models.binary import polynomial_features
+
+    rng = np.random.default_rng(0)
+    x2 = rng.uniform(-1, 1, (40, 2))
+    binary = PolynomialLogisticModel(2, w=rng.normal(size=6))
+    wider = binary.expanded(4)
+    # a wider matrix product sums in a different order, so equality holds to rounding only
+    np.testing.assert_allclose(wider.score(x2), binary.score(x2), rtol=0, atol=1e-12)
+    assert not wider.w[6:].any()
+
+    x16 = rng.normal(size=(40, 16)).astype(np.float32)
+    small = scaled_polynomial_features(x16, 1)
+    large = scaled_polynomial_features(x16, 2)
+    head = rng.normal(size=(small.shape[1], 10)).astype(np.float32)
+    grown = expand_weights(head, large.shape[1])
+    np.testing.assert_allclose(large @ grown, small @ head, rtol=0, atol=1e-5)
+    assert not grown[small.shape[1] :].any()
+    np.testing.assert_array_equal(large[:, : small.shape[1]], small)  # prefix property
+    assert polynomial_features(x2, 2).shape[1] == 6
