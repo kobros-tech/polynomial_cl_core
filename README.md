@@ -200,7 +200,8 @@ src/polynomial_cl/
     multiclass.py   softmax-head semantics: logits, class-eligible prediction, zero-init expansion
   training/
     binary.py       gradient descent for the binary model (masks, per-coefficient rates, null space)
-    multiclass.py   softmax head trainer: class masking, update masks, null-space projection, sampling
+    multiclass.py   softmax head trainer: class masking, update masks, null-space projection;
+                    mini-batch sampling is injected (never imports continual/)
   data/
     synthetic.py    target functions (sinusoid, circle), sampling/labelling, the ten-class ring
     mnist.py        offline-capable MNIST loader and the fixed random projection
@@ -213,6 +214,8 @@ src/polynomial_cl/
     experiment.py   protocol, conditions, indicators, summaries, joint reference
     strategies.py   update restrictions of the six strategies (masks and null spaces)
     degree_rates.py per-degree rate vectors (validation, degree of every feature)
+    replay.py       replay memory: per-class draw and the stored indices every use reads
+    sampling.py     shuffled / class-balanced mini-batch policies handed to the trainer
     degree_study.py sampling comparison and the validated per-degree rate study
   plotting/         synthetic.py (binary plots), continual.py (CIL plots); imported on demand
 experiments/        command-line entry points (argument parsing, configuration, writing JSON);
@@ -234,7 +237,8 @@ Run the scripts as `python experiments/<name>.py` from the repository root. Reus
 - Synthetic data: `test_synthetic_data` (sinusoidal experiences bit-identical to the pre-refactor generator, circular target geometry, reproducibility, independent train/test streams, label noise), `test_joint_studies`.
 - Class-incremental code: `test_class_incremental` and `test_mnist` (features, expansion invariant and its guard, masked evaluation, forgetting definition, per-class accuracy, takeover versus flip diagnostics, determinism, offline Split MNIST), `test_multiclass_model`, `test_multiclass_training`, `test_strategies` (the update restrictions of the six strategies), `test_class_incremental_plotting`, `test_reporting_rows`.
 - Per-degree rates and sampling: `test_per_degree` (vector validation, per-group parameter updates, zero rates, masks, Strategy B, expansion, class counts, no future-class draws, reproducibility, accuracy/forgetting).
-- Structure: `test_architecture` (import graph without cycles, class-incremental code independent of the binary code, entry points not importing each other, no stale imports in source, tests, experiments and notebooks).
+- Replay and sampling: `test_replay_sampling` (memory draw and stored-index order, policy-to-sampler mapping, the trainer's injected sampler).
+- Structure: `test_architecture` (import graph without cycles, class-incremental code independent of the binary code, binary/model/trainer code independent of the class-incremental code, entry points not importing each other, no stale imports in source, tests, experiments and notebooks).
 - Workflows: `test_experiment_scripts` (the command-line tools) and `test_notebooks` (every notebook compiles, has unique valid cell ids, is committed without outputs, reads no result file, and executes cleanly under `-m slow`).
 
 ## Reproducibility

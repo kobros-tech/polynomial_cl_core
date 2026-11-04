@@ -26,6 +26,7 @@ from typing import NamedTuple
 import numpy as np
 
 from ..training.multiclass import null_space_basis
+from .replay import stored_indices
 
 # Update rules compared on the ``expanding`` schedule (same definitions as the binary
 # experiments in polynomial_cl.binary.experiment, but the code is independent). A coefficient
@@ -89,9 +90,7 @@ def update_restrictions(
     elif strategy == "strategy_b_new" and task:
         scale = np.ones(weights_shape, np.float32)
         scale[:old_rows, :old_classes] = 0.0
-        refs = np.concatenate(
-            [memory_indices[c][:n_ref_per_class] for c in range(old_classes)]
-        )
+        refs = stored_indices(memory_indices, old_classes, n_ref_per_class)
         ref_design = train_x[refs, :count]
         if step_scale is not None:
             ref_design = ref_design * np.sqrt(step_scale)
@@ -110,9 +109,7 @@ def update_restrictions(
             (slice(old_classes, n_seen), null_space_basis(ref_design)),
         ]
     elif strategy == "strategy_b" and task:
-        refs = np.concatenate(
-            [memory_indices[c][:n_ref_per_class] for c in range(old_classes)]
-        )
+        refs = stored_indices(memory_indices, old_classes, n_ref_per_class)
         ref_design = train_x[refs, :count]
         if step_scale is not None:
             ref_design = ref_design * np.sqrt(step_scale)

@@ -24,7 +24,6 @@ from ..metrics import forgetting as forgetting_from_matrix
 from ..metrics import mean_std_by_condition
 from ..models.multiclass import expand_weights, logits, predict
 from ..training.multiclass import (
-    SAMPLING_POLICIES,
     cross_entropy,
     fit_task,
 )
@@ -39,6 +38,8 @@ from .features import (
     n_polynomial_features,
     scaled_polynomial_features,
 )
+from .replay import select_memory, stored_indices
+from .sampling import epoch_sampler
 from .strategies import (
     N_REF_PER_CLASS,
     STRATEGIES,
@@ -135,12 +136,7 @@ def make_task_plan(labels, seed, memory_per_class):
             raise ValueError(f"training data is missing task classes {classes}")
         tasks.append(indices[rng.permutation(len(indices))])
         for class_id in classes:
-            candidates = np.flatnonzero(labels == class_id)
-            if len(candidates) == 0:
-                raise ValueError(f"training data is missing class {class_id}")
-            memory[class_id] = rng.choice(
-                candidates, min(memory_per_class, len(candidates)), replace=False
-            )
+            memory[class_id] = select_memory(labels, class_id, memory_per_class, rng)
     return tasks, memory
 
 
@@ -342,8 +338,7 @@ def run_condition(
         raise ValueError(f"unknown condition: {condition}")
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy: {strategy}")
-    if sampling not in SAMPLING_POLICIES:
-        raise ValueError(f"unknown sampling policy: {sampling}")
+    sampler = epoch_sampler(sampling)
     per_degree = np.ndim(learning_rate) > 0
     if per_degree and feature_power:
         raise ValueError(
@@ -384,7 +379,7 @@ def run_condition(
         old_classes = 2 * task
         n_seen = 2 * (task + 1)
         if task and strategy != "ordinary_no_replay":
-            replay = np.concatenate([memory_indices[c] for c in range(old_classes)])
+            replay = stored_indices(memory_indices, old_classes)
         else:
             replay = np.empty(0, dtype=np.int64)
         train_x = np.concatenate(
@@ -444,7 +439,7 @@ def run_condition(
             feature_scale=feature_scale,
             group_scale=group_scale,
             group_index=group_index,
-            sampling=sampling,
+            epoch_sampler=sampler,
             stats=fit_stats,
         )
         effective = (

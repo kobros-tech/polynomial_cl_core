@@ -31,9 +31,9 @@ from polynomial_cl.continual.features import (
     MAX_DEGREE,
     n_polynomial_features,
 )
+from polynomial_cl.continual.sampling import balanced_batches
 from polynomial_cl.data import make_synthetic_2d
 from polynomial_cl.training.multiclass import (
-    _balanced_batches,
     fit_task,
     null_space_basis,
 )
@@ -348,7 +348,7 @@ def test_diagnostics_have_the_documented_shape_and_are_finite(tiny_data):
 def test_class_balanced_batches_have_equal_class_counts_and_repeat_small_pools():
     labels = np.repeat(np.arange(4), [3, 500, 500, 40])
     rng = np.random.default_rng(0)
-    batches = list(_balanced_batches(labels, 20, 32, rng))
+    batches = list(balanced_batches(labels, 20, 32, rng))
     assert len(batches) == 20 and all(len(b) == 32 for b in batches)
     for batch in batches:
         counts = np.bincount(labels[batch], minlength=4)
@@ -361,7 +361,7 @@ def test_class_balanced_batches_have_equal_class_counts_and_repeat_small_pools()
 
 def test_class_balanced_remainder_goes_to_distinct_classes():
     labels = np.repeat(np.arange(3), 50)
-    for batch in _balanced_batches(labels, 10, 10, np.random.default_rng(1)):
+    for batch in balanced_batches(labels, 10, 10, np.random.default_rng(1)):
         counts = np.bincount(labels[batch], minlength=3)
         assert sorted(counts) == [3, 3, 4]
 

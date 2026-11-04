@@ -101,10 +101,13 @@ def test_class_incremental_code_does_not_depend_on_binary_code():
             assert not bad, f"{module} reaches binary-only code: {bad}"
 
 
-def test_binary_code_does_not_depend_on_class_incremental_code():
+def test_binary_models_and_trainers_do_not_depend_on_class_incremental_code():
+    """Class-incremental code uses the trainers (injecting its sampler), never the reverse."""
     graph = _graph()
     for module in graph:
-        if module.startswith(("polynomial_cl.binary", "polynomial_cl.models")):
+        if module.startswith(
+            ("polynomial_cl.binary", "polynomial_cl.models", "polynomial_cl.training")
+        ):
             reached = _closure(graph, module)
             assert not [r for r in reached if r.startswith(CIL)], module
 

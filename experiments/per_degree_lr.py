@@ -36,7 +36,7 @@ from polynomial_cl.continual.experiment import (
     N_REF_PER_CLASS,
     STRATEGIES,
 )
-from polynomial_cl.training.multiclass import SAMPLING_POLICIES
+from polynomial_cl.continual.sampling import SAMPLING_POLICIES
 
 
 def main():
