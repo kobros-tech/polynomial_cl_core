@@ -9,7 +9,8 @@ not stored separately, so it can never be counted twice.
 The feature map is the *raw* 2-D monomial map in float64 (x1^i * x2^j). It shares only the
 monomial enumeration and the zero-coefficient expansion with the class-incremental code
 (``polynomial_cl.features``); the class-incremental setting uses its own degree-scaled map
-(``polynomial_cl.continual.features``) and a softmax head instead of this model.
+(``polynomial_cl.continual.features``) and the softmax head of
+``polynomial_cl.models.multiclass`` instead of this model.
 """
 
 from __future__ import annotations

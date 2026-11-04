@@ -5,9 +5,6 @@ import numpy as np
 import pytest
 
 from polynomial_cl.continual.features import (
-    expand_weights,
-)
-from polynomial_cl.continual.features import (
     monomial_exponents as continual_monomial_exponents,
 )
 from polynomial_cl.features import (
@@ -16,6 +13,7 @@ from polynomial_cl.features import (
     validate_degree,
 )
 from polynomial_cl.models.binary import PolynomialLogisticModel
+from polynomial_cl.models.multiclass import expand_weights
 
 
 # ----------------------------------------- shared by binary and class-incremental code

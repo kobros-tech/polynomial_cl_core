@@ -7,13 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 
-
-def softmax(logits: np.ndarray) -> np.ndarray:
-    """Compute numerically stable row-wise softmax probabilities."""
-    shifted = logits - logits.max(axis=1, keepdims=True)
-    exp_logits = np.exp(shifted)
-    return exp_logits / exp_logits.sum(axis=1, keepdims=True)
-
+from ..models.multiclass import softmax
 
 SAMPLING_POLICIES = ("shuffled", "class_balanced")
 

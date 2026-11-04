@@ -8,8 +8,8 @@
 * ``polynomial_cl.binary``: sequential *binary* learning under spatial distribution shift.
   This is not class-incremental learning.
 * ``polynomial_cl.features`` and ``polynomial_cl.metrics``: the polynomial and metric
-  primitives both settings share. ``models`` and ``training`` hold the binary model/optimiser
-  and the softmax-head optimiser.
+  primitives both settings share. ``models`` holds the binary model and the multiclass
+  (softmax-head) model, ``training`` their two separate optimisers.
 """
 
 from . import binary, continual, data, features, metrics, models, training

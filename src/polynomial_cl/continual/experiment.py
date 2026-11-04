@@ -22,6 +22,7 @@ import numpy as np
 
 from ..metrics import forgetting as forgetting_from_matrix
 from ..metrics import mean_std_by_condition
+from ..models.multiclass import expand_weights, logits, predict
 from ..training.multiclass import (
     SAMPLING_POLICIES,
     cross_entropy,
@@ -35,7 +36,6 @@ from .degree_rates import (
 )
 from .features import (
     MAX_DEGREE,
-    expand_weights,
     n_polynomial_features,
     scaled_polynomial_features,
 )
@@ -73,7 +73,7 @@ MEMORY_PER_CLASS = 200
 EXPANSION_TOLERANCE = 1e-5
 
 
-def expansion_tolerance(logits):
+def expansion_tolerance(class_logits):
     """Allowed logit change when zero coefficients are appended.
 
     Appending zeros is exact in real arithmetic; in float32 the same logits are summed with a
@@ -81,7 +81,7 @@ def expansion_tolerance(logits):
     large logits). The bound is EXPANSION_TOLERANCE for logits of order 1 and relative above
     that, which still rejects any non-zero new coefficient.
     """
-    return EXPANSION_TOLERANCE * max(1.0, float(np.max(np.abs(logits))))
+    return EXPANSION_TOLERANCE * max(1.0, float(np.max(np.abs(class_logits))))
 
 
 class FeatureData(NamedTuple):
@@ -154,8 +154,7 @@ def accuracy_by_task(weights, test_x, test_y, n_tasks_seen, by_class=None):
     accuracy = np.full(len(TASK_ORDER), np.nan)
     for task, classes in enumerate(TASK_ORDER[:n_tasks_seen]):
         rows = np.flatnonzero(np.isin(test_y, classes))
-        logits = test_x[rows] @ weights
-        predictions = logits[:, : 2 * n_tasks_seen].argmax(axis=1)
+        predictions = predict(logits(weights, test_x[rows]), 2 * n_tasks_seen)
         accuracy[task] = np.mean(predictions == test_y[rows])
         if by_class is not None:
             for c in classes:
@@ -232,18 +231,18 @@ def _record_indicators(
     if task:
         x = data.test_x[old_test, :count]
         old_before, old_after = (
-            x @ before[:, :old_classes],
-            x @ weights[:, :old_classes],
+            logits(before, x, old_classes),
+            logits(weights, x, old_classes),
         )
         out["old_logit_change_by_task"].append(
             float(np.max(np.abs(old_after - old_before)))
         )
-        flips = old_before.argmax(axis=1) != old_after.argmax(axis=1)
+        flips = predict(old_before) != predict(old_after)
         out["old_flip_fraction_by_task"].append(float(flips.mean()))
         # The flip diagnostic above only lets old classes compete, so it cannot see a new
         # class taking over an old example while the old logits barely move. Here every
         # class seen so far competes, exactly as in the accuracy matrix.
-        predicted = (x @ weights[:, :n_seen]).argmax(axis=1)
+        predicted = predict(logits(weights, x, n_seen))
         out["old_takeover_fraction_by_task"].append(
             float((predicted >= old_classes).mean())
         )
@@ -654,7 +653,7 @@ def run_joint_reference(
         batch_size=batch_size,
         seed=seed,
     )
-    predictions = (data.test_x[:, :count] @ weights).argmax(axis=1)
+    predictions = predict(logits(weights, data.test_x[:, :count]))
     per_class = [float(np.mean(predictions[data.test_y == c] == c)) for c in range(10)]
     return {
         "degree": degree,

@@ -3,7 +3,8 @@
 
 import numpy as np
 
-from polynomial_cl.training.multiclass import fit_task, softmax
+from polynomial_cl.models.multiclass import softmax
+from polynomial_cl.training.multiclass import fit_task
 
 
 def test_softmax_rows_are_distributions_and_stable_for_large_logits():

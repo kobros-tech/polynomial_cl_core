@@ -19,7 +19,33 @@ The project is a continual-learning study first and a machine-learning library s
 
 Class-incremental learning and sequential binary classification under a shifting input distribution are different settings, and results from one must not be presented as results for the other. Conventional joint training (notebook 01) is only a reference point: it sees all data at once, so it has no sequence of experiences and no forgetting.
 
-Observed behaviour, with every number traced to a command, is summarised under [Results](#results). This README is the project's only documentation file.
+This README describes the structure, protocols and commands. It deliberately records no measured results or research conclusions: those are produced by running the notebooks and experiment scripts, and are reviewed in a separate research-results change. This README is the project's only documentation file.
+
+## Architecture
+
+Binary learning and class-incremental learning are different tasks, but they share one polynomial foundation:
+
+```text
+                 polynomial_cl.features              monomial_exponents: prefix-stable order of the
+                         |                           monomials; append_zero_coefficients: zero-initialised
+                         |                           expansion; validate_degree
+           +-------------+--------------+
+           |                            |
+  models/binary.py             models/multiclass.py
+  one score, sigmoid, 0/1      softmax head, logits, argmax over the
+  labels; raw 2-D monomials    classes in play; scaled 16-D monomials
+           |                            |
+  training/binary.py           training/multiclass.py
+           |                            |
+  binary/  sequential binary   continual/  class-incremental learning
+  learning under spatial shift (Split MNIST, six update strategies)
+```
+
+- **Shared foundation.** Both models enumerate monomials in the same order, so the features of degree _d_ are a prefix of those of degree _d_ + 1. A model grows by appending zero coefficients, which leaves every existing output unchanged. This expansion invariant is tested on actual outputs for both model types (`tests/test_features.py`, `tests/test_multiclass_model.py`, `tests/test_binary_expansion.py`).
+- **Binary versus multiclass.** The two models have different outputs, losses and prediction rules and share no trainer or base class. The binary model is a logistic regression on one score; the multiclass model is a softmax head whose prediction only considers the classes introduced so far.
+- **Multiclass and class-incremental learning.** `polynomial_cl.continual` uses the multiclass model and its trainer and never imports binary code (enforced by `tests/test_architecture.py`). The experience sequence, replay memory, update strategies and per-degree learning rates are class-incremental concerns and live there, not in the generic data or model modules.
+- **Synthetic target interface.** `polynomial_cl.data.make_synthetic_dataset(target_function=..., n_samples=..., seed=..., kind=...)` takes the target geometry as an argument. `sinusoidal_target` (`y = 1 iff x2 > 0.5 sin(3 x1)`) is the default everywhere; `circular_target` (a circle of radius 0.7 at the origin) and `make_circular_target(center, radius)` give a different geometry with the same labels convention. A target only says how labels are generated; how experiences are cut from the data belongs to the experiment (`polynomial_cl.binary` cuts vertical strips).
+- **Notebooks.** `notebooks/01_joint_training.ipynb` is the non-continual reference (targets, degree, training budget, Split MNIST joint training). `notebooks/02_continual_learning.ipynb` is the continual-learning study (protocol, expansion invariant, capacity, sampling and replay, the six strategies, per-degree learning rates, Split MNIST across seeds). Each section starts from a research question and states what the executed cells do and do not show.
 
 ## Setup
 
@@ -113,7 +139,7 @@ Protocol of the per-degree study: every candidate is measured on a 10% validatio
 
 ### How to read the results
 
-- **Training budget and rates.** The defaults (3 epochs, one shared rate 0.1) are far from convergence, and conclusions drawn at them were reversed once rates were tuned (see [Results](#results)). Do not treat default-rate results as evidence that one condition is better. Compare conditions only at rates selected **per condition on validation data**, over several seeds, and repeat with several `--epochs` values.
+- **Training budget and rates.** The defaults (3 epochs, one shared rate 0.1) are a fixed historical protocol, not a tuned or converged setting. Do not treat default-rate results as evidence that one condition is better. Compare conditions only at rates selected **per condition on validation data**, over several seeds, and repeat with several `--epochs` values.
 - **The ring is linearly solvable.** Equal isotropic Gaussian classes have linear Bayes boundaries, so that dataset checks the machinery and cannot reward extra capacity; Split MNIST and the binary sinusoid are the capacity tests. With the default 160 training samples per class the replay memory (200 per class) holds _all_ earlier data on the ring, whereas it is a genuine 200-example budget on MNIST. A genuinely nonlinear ten-class synthetic dataset is not yet implemented.
 - **Seeds.** For the class-incremental runs the data, test sets and projection are fixed; seeds change shuffling and replay selection only, so the spread across seeds understates dataset-level variability.
 
@@ -159,125 +185,7 @@ Each experience stores up to `capacity` training samples (seeded choice without 
 
 Current-experience accuracy; mean accuracy over observed experiences; `max |f_after - f_before|` over old test inputs; fraction of old test predictions that flipped; forgetting (best earlier accuracy minus current accuracy); max change of frozen coefficients (reported as unavailable when none are frozen), change in the preserved old component, maximum combined-coefficient change, and L1 update of trainable coefficients; for Strategy B also the change at reference inputs and the free dimensions left by the constraint.
 
-Hyper-parameters of the binary experiment (`lr=0.5`, 300 epochs per experience, replay `m=100`, capacity 100) were fixed before the continual experiments were run and were not tuned afterwards; all strategies share them. the Results section shows that this shared rate is far from converged.
-
-## Results
-
-All numbers are mean +/- sample standard deviation over seeds, produced by the commands above and the notebooks. Seeds change shuffling and replay selection (and, for the binary task only, the generated data); for Split MNIST the data, test set and projection are fixed, so the spread understates dataset-level variability. Hyper-parameters were not tuned on test data, except where "selected" is stated.
-
-### Class-incremental learning
-
-**Default shared rates (3 epochs, lr 0.1, seeds 0-4): final mean accuracy / mean forgetting.** These runs are far from converged; use them to compare mechanisms, not to rank conditions.
-
-| setting | `fixed_linear` | `expanding` | `fixed_capacity` |
-| --- | --- | --- | --- |
-| ring, 3 epochs | 0.709 +/- 0.002 / 0.008 | 0.909 +/- 0.001 / 0.023 | 0.908 +/- 0.001 / 0.025 |
-| ring, 30 epochs (seeds 0-2) | 0.906 | 0.910 | 0.908 |
-| Split MNIST, 3 epochs | 0.176 +/- 0.000 / 0.926 | 0.246 +/- 0.002 / 0.858 | 0.256 +/- 0.001 / 0.846 |
-| Split MNIST, 30 epochs (seed 0) | 0.337 | 0.481 | 0.484 |
-
-- **Ring: no capacity effect.** The 3-epoch gap closes with training, as expected for a linearly solvable task: it reflects how fast each model learns a new class from zero-initialised weights.
-- **Split MNIST: expansion helps; gradual growth is not shown to matter.** `fixed_linear` < `expanding` ~ `fixed_capacity` from 1 to 30 epochs. The near-equality of the last two shows that capacity matters, not that gradual expansion is better.
-
-**Rates selected on validation data.** For each condition `(p, lr)` was selected on a 10% validation split of the training set (grid p in {0,1,2,3}, lr in {0.01 ... 1}, seeds 0-1) and then evaluated on the test set with disjoint seeds 2-6 (`experiments/rate_selection.py`). A wider grid (p up to 5, lr down to 0.001) selects the same cells for the three conditions, so the optima are not grid-boundary artifacts (that check was run for the conditions only).
-
-| condition / rule | default rates (seeds 0-4) | selected (p, lr) | test accuracy (seeds 2-6) | forgetting | old takeover |
-| --- | --- | --- | --- | --- | --- |
-| `fixed_linear` | 0.176 | 3, 0.3 | 0.430 +/- 0.016 | 0.602 | 0.569 |
-| `expanding` (= `ordinary`) | 0.246 | 3, 0.01 | 0.640 +/- 0.013 | 0.379 | 0.331 |
-| `fixed_capacity` | 0.256 | 3, 0.01 | 0.642 +/- 0.012 | 0.381 | 0.287 |
-| Strategy B, 3 refs | 0.538 | 2, 0.3 | 0.647 +/- 0.006 | 0.370 | not recorded |
-| `small_old_lr` | 0.260 | 2, 1 | 0.627 +/- 0.047 | 0.370 | not recorded |
-| `frozen_old` | 0.274 | 3, 0.01 | 0.577 +/- 0.012 | 0.454 | not recorded |
-| `ordinary_no_replay` | 0.192 | 1, 0.01 | 0.212 +/- 0.000 | 0.899 | not recorded |
-
-- **Expansion helps.** Without it the model is capacity-limited rather than rate-limited (0.430 with tuned rates versus 0.640).
-- **Strategy B has no demonstrated advantage.** Its large advantage at default rates (0.538 versus 0.246) came from an under-trained shared-rate baseline; with rates selected per rule, B (0.647) and `ordinary` (0.640) differ by less than one standard deviation of `ordinary`.
-- **`frozen_old` is worse, replay is the dominant ingredient** (0.212 without it), and `small_old_lr` matches `ordinary` with more variance; its selected rate lies on the upper edge of the grid.
-- **Strategy B is a stability-plasticity dial** (3 seeds, default rates): with 1, 3, 10, 30, 100, 200 reference inputs per old class, old takeover is 0.648, 0.379, 0.169, 0.055, 0.009, 0.001 and current-experience accuracy is 0.819, 0.669, 0.450, 0.161, 0.005, 0.000.
-
-**Where old-class accuracy goes (default rates, five seeds).** After training, a **new class** can win an old-class input (takeover) or the prediction can move **between old classes** (flip); the accuracy matrix cannot separate the two (see the diagnostics section above).
-
-| rule | final mean acc | forgetting | old flips | old takeover |
-| --- | --- | --- | --- | --- |
-| `ordinary_no_replay` | 0.192 | 0.925 | 0.139 | 0.996 |
-| `ordinary` (= `expanding`) | 0.246 | 0.858 | 0.385 | 0.961 |
-| `small_old_lr` | 0.260 | 0.838 | 0.078 | 0.940 |
-| `frozen_old` | 0.274 | 0.820 | 0.021 | 0.925 |
-| Strategy B, 3 refs | 0.538 | 0.405 | 0.074 | 0.381 |
-
-- **At default rates the dominant failure is takeover, not damage to the old function:** for every rule except Strategy B, 92-100% of old test inputs end up predicted as a new class. `frozen_old` moves old logits among themselves least (flips 0.021) yet loses as much accuracy to takeover as the others, so freezing old coefficients does not stop a new class from outscoring them.
-- **Tuned rates reduce takeover but do not remove it** (0.29-0.33 for the polynomial conditions, 0.57 for `fixed_linear`); forgetting and takeover are of the same order, but they are different quantities (best-minus-final per experience versus a per-step fraction), so this is not an identity.
-- **Class imbalance** (200 stored examples per old class against about 6,000 per new class) is tested in the sampling-policy results below.
-
-**Sampling policy (Split MNIST, `expanding`, lr 0.1, 3 epochs, seeds 0-4, same updates and memory).** Final mean accuracy / newest-experience accuracy / forgetting / old takeover:
-
-| rule | `shuffled` | `class_balanced` |
-| --- | --- | --- |
-| `ordinary` | 0.246 / 0.902 / 0.858 / 0.961 | 0.675 / 0.452 / 0.073 / 0.071 |
-| `ordinary_no_replay` | 0.192 / 0.902 / 0.925 / 0.996 | 0.192 / 0.902 / 0.925 / 0.996 |
-| `small_old_lr` | 0.260 / 0.897 / 0.838 / 0.940 | 0.663 / 0.488 / 0.102 / 0.077 |
-| `frozen_old` | 0.274 / 0.893 / 0.820 / 0.925 | 0.667 / 0.493 / 0.102 / 0.077 |
-| Strategy B, 3 refs | 0.538 / 0.683 / 0.405 / 0.381 | 0.630 / 0.186 / 0.053 / 0.058 |
-| Strategy B new, 3 refs | 0.543 / 0.496 / 0.336 / 0.304 | 0.601 / 0.178 / 0.067 / 0.060 |
-
-- **Budget:** both policies make the same number of updates (315 in the last experience); `shuffled` processes exactly the 40,200 available examples and `class_balanced` 40,320 (+0.3%, because every batch is full). Both counts are stored per experience.
-- **The imbalance is a major cause of takeover and forgetting** (the untested explanation above is now tested): balancing the batches removes most takeover. It costs plasticity, so neither policy is best on both axes. Without replay there is nothing to balance.
-
-**Per-degree rate vectors, six strategies (test seeds 3-9; rates chosen on validation seeds 0-2 by Pareto front and accuracy minus forgetting; 3 epochs per experience).** "Shared" is the validation-chosen single rate from the grid 0.01-30, "selected" is the vector the rule picked among the shared reference, 16 one-group vectors (each group x0.25, x0.5, x2, x4) and one follow-up vector. The last column is the paired difference (selected minus shared) over the seven test seeds.
-
-| strategy | sampling | shared rate: acc +/- std / newest / forgetting | selected vector `[d0, d1, d2, d3]`: acc +/- std / newest / forgetting | paired change in acc (seeds better) |
-| --- | --- | --- | --- | --- |
-| `ordinary` | balanced | 3: 0.769 +/- 0.003 / 0.706 / 0.097 | `[0.75, 1.5, 1.5, 6]`: 0.773 +/- 0.003 / 0.716 / 0.096 | +0.004 +/- 0.002 (7/7) |
-| `small_old_lr` | balanced | 10: 0.780 +/- 0.004 / 0.732 / 0.105 | `[20, 10, 10, 10]`: 0.778 +/- 0.005 / 0.729 / 0.101 | -0.002 +/- 0.002 (0/7) |
-| `frozen_old` | balanced | 10: 0.776 +/- 0.005 / 0.724 / 0.108 | `[2.5, 2.5, 10, 10]`: 0.778 +/- 0.004 / 0.722 / 0.105 | +0.003 +/- 0.002 (7/7) |
-| Strategy B | balanced | 3: 0.764 +/- 0.002 / 0.673 / 0.094 | `[12, 0.75, 0.75, 6]`: 0.769 +/- 0.003 / 0.693 / 0.090 | +0.005 +/- 0.002 (7/7) |
-| Strategy B new | balanced | 10: 0.771 +/- 0.002 / 0.691 / 0.103 | `[5, 5, 2.5, 10]`: 0.767 +/- 0.003 / 0.683 / 0.098 | -0.004 +/- 0.001 (0/7) |
-| `ordinary_no_replay` | balanced | 0.01: 0.221 +/- 0.000 / 0.866 / 0.865 | `[0.0025, 0.01, 0.02, 0.04]`: 0.256 +/- 0.000 / 0.870 / 0.824 | +0.035 +/- 0.000 (7/7) |
-| `ordinary` | shuffled | 30: 0.568 +/- 0.072 / 0.888 / 0.437 | `[30, 30, 30, 120]`: 0.626 +/- 0.081 / 0.898 / 0.374 | +0.058 +/- 0.068 (5/7) |
-| `small_old_lr` | shuffled | 10: 0.548 +/- 0.050 / 0.904 / 0.487 | `[2.5, 40, 20, 40]`: 0.585 +/- 0.065 / 0.906 / 0.429 | +0.037 +/- 0.044 (6/7) |
-| `frozen_old` | shuffled | 30: 0.462 +/- 0.071 / 0.863 / 0.557 | `[15, 30, 30, 30]`: 0.476 +/- 0.063 / 0.881 / 0.551 | +0.014 +/- 0.029 (6/7) |
-| Strategy B | shuffled | 30: 0.648 +/- 0.008 / 0.918 / 0.371 | `[120, 120, 120, 60]`: 0.653 +/- 0.010 / 0.893 / 0.327 | +0.005 +/- 0.008 (6/7) |
-| Strategy B new | shuffled | 0.03: 0.535 +/- 0.020 / 0.353 / 0.287 | `[0.12, 0.12, 0.03, 0.0075]`: 0.505 +/- 0.033 / 0.116 / 0.167 | -0.030 +/- 0.024 (0/7) |
-| `ordinary_no_replay` | shuffled | 0.01: 0.221 +/- 0.000 / 0.869 / 0.869 | `[0.0025, 0.0025, 0.01, 0.04]`: 0.264 +/- 0.000 / 0.861 / 0.815 | +0.044 +/- 0.000 (7/7) |
-
-**Does the conclusion survive longer training?** The same vectors (chosen at 3 epochs, not re-selected) were re-run at 10 epochs on the same test seeds:
-
-| strategy | sampling | shared rate at 10 epochs: acc +/- std / newest / forgetting | selected (chosen at 3 epochs) minus shared: change in acc (seeds better) |
-| --- | --- | --- | --- |
-| `ordinary` | balanced | 0.778 +/- 0.004 / 0.749 / 0.117 | +0.003 +/- 0.002 (7/7) |
-| `small_old_lr` | balanced | 0.786 +/- 0.005 / 0.767 / 0.122 | +0.000 +/- 0.001 (3/7) |
-| `frozen_old` | balanced | 0.785 +/- 0.005 / 0.755 / 0.118 | +0.001 +/- 0.001 (6/7) |
-| Strategy B | balanced | 0.776 +/- 0.003 / 0.725 / 0.112 | +0.002 +/- 0.001 (7/7) |
-| Strategy B new | balanced | 0.781 +/- 0.004 / 0.732 / 0.118 | -0.001 +/- 0.002 (2/7) |
-| `ordinary_no_replay` | balanced | 0.203 +/- 0.000 / 0.889 / 0.901 | +0.028 +/- 0.000 (7/7) |
-| `ordinary` | shuffled | 0.610 +/- 0.072 / 0.858 / 0.370 | +0.020 +/- 0.039 (4/7) |
-| `small_old_lr` | shuffled | 0.625 +/- 0.020 / 0.925 / 0.394 | +0.005 +/- 0.032 (5/7) |
-| `frozen_old` | shuffled | 0.551 +/- 0.084 / 0.867 / 0.450 | -0.021 +/- 0.082 (2/7) |
-| Strategy B | shuffled | 0.658 +/- 0.009 / 0.924 / 0.363 | +0.002 +/- 0.006 (3/7) |
-| Strategy B new | shuffled | 0.546 +/- 0.021 / 0.525 / 0.340 | -0.018 +/- 0.016 (1/7) |
-| `ordinary_no_replay` | shuffled | 0.203 +/- 0.000 / 0.889 / 0.902 | +0.039 +/- 0.000 (7/7) |
-
-- **Under balanced sampling, per-degree vectors are not worth more than a tuned shared rate.** The validation-selected vector changed test accuracy by -0.004 to +0.005 (for the five strategies with replay), and by -0.001 to +0.003 at 10 epochs. Four of the five were better on all seven seeds, but by 0.003-0.005, about one seed standard deviation, and two cells (`small_old_lr`, Strategy B new) were worse on all seven seeds, so the validation choice does not reliably transfer. The earlier suggestion that a larger cubic rate helps (+0.005 to +0.016) was not confirmed by this wider protocol (three selection seeds, four factors, seven test seeds).
-- **Shuffled sampling needs very large rates and is noisy.** Selected vectors raise accuracy by 0.005-0.058 in five of six cells, mostly by making some or all groups larger than the grid maximum of 30 (an effectively uniform larger rate, e.g. `[120, 120, 120, 60]`), but the seed spread is 0.03-0.08 and the gain is not carried over to 10 epochs (-0.021 to +0.020, never better on more than five of seven seeds).
-- **The selection rule can reward rigidity.** For Strategy B new with shuffled sampling it chose a vector with forgetting 0.167 but newest-experience accuracy 0.116 (shared: 0.353), worse on all seven seeds. For `ordinary_no_replay` there is nothing to protect, so the gain from smaller rates (+0.035 at accuracy 0.22) is not meaningful. The `--min-current-accuracy` floor exists for this case and was not used.
-- **Strategies are close once rates are tuned.** With balanced sampling the five replay-based rules reach 0.764-0.780 (3 epochs) and 0.776-0.786 (10 epochs) at their best shared rate, with forgetting 0.09-0.12; `small_old_lr` and `frozen_old` are highest by 0.005-0.015, and the Strategy B variants have the weakest newest-experience accuracy at default rates. These gaps are small relative to the cross-seed spread, so **no strategy is shown optimal**. Strategy B new freezes old coefficients and keeps the null-space guarantee: at the default rate it forgets less than Strategy B (0.336 against 0.405 with shuffled sampling) but learns the newest classes worse (0.496 against 0.683).
-- **Strategy count.** The class-incremental code now has all six distinct rules of the older eight-strategy list (`strategy_a_all` and `strategy_a_new` were removed from `main` as identical to `ordinary` and `frozen_old`): `ordinary`, `ordinary_no_replay`, `small_old_lr`, `frozen_old`, `strategy_b` (the binary `strategy_b_all`) and `strategy_b_new`.
-- Limits: one dataset and projection, 3 and 10 epochs, one-group-at-a-time perturbations plus one greedy follow-up (no joint search over groups), factors 0.25-4, and a seed spread that understates dataset variability. The study was run on two machines (nine cells here, three locally, same code apart from a float32 tolerance), which can differ in the last digits.
-
-### Supporting binary sinusoid (five seeds, 300 epochs, shared rate lr 0.5)
-
-| | degree 1 throughout | grow 1..10 | fixed degree 10 |
-| --- | --- | --- | --- |
-| final mean accuracy / forgetting | 0.910 +/- 0.003 / 0.043 | 0.965 +/- 0.004 / 0.008 | 0.970 +/- 0.005 / 0.011 |
-
-- **Capacity matters; gradual growth does not.** Growing and fixed degree 10 are within one standard deviation at the end; the fixed model is better after experience 1 (0.988 versus 0.959) and they converge by experiences 8-10, because zero-initialised expansion preserves the function and replay covers all experiences.
-- **The shared rate is not converged** (`ordinary`: 0.967 at 300, 0.979 at 1,000, 0.991 at 10,000 epochs). A single per-feature setting, `lr_feature_power = 1` with `lr = 4`, which was picked by hand and not selected on held-out data, reaches 0.992 for growing and 0.991 for fixed degree 10 in 300 epochs.
-- **Update rules (shared rate):** `ordinary` 0.965, `small_old_lr` 0.916, `frozen_old` 0.842, Strategy B (3 refs per old experience) 0.840, `ordinary_no_replay` 0.866. Strategy B fits the sine curve poorly because of its constraint, not optimisation: pinning `g` at reference inputs leaves little usable freedom in the current strip, and 10x the epochs gives 0.839 +/- 0.031. More references lower accuracy monotonically (0.965 ordinary, 0.912, 0.848, 0.840 for 0, 1, 2, 3 references). `strategy_b_new` has no free dimensions from experience 2 on and does not learn.
-
-### Decision and limits
-
-Keep `ordinary` (replay, all coefficients trainable) with per-feature rates as the default; Strategy B is kept only as a controllable preservation diagnostic. Limits: Split MNIST is one dataset with one random projection and 3 epochs; the selected settings are close to others on the grid (for `expanding`, validation 0.630 at p = 3, lr 0.01 versus 0.625 at p = 2, lr 0.1); Strategy B was selected with 3 references only and the wide-grid check covers only the conditions; per-feature rates were not tested for Strategy B on the binary task, whose trainer requires one shared rate. A genuinely nonlinear ten-class synthetic dataset, where capacity should matter, is not yet implemented.
+Hyper-parameters of the binary experiment (`lr=0.5`, 300 epochs per experience, replay `m=100`, capacity 100) were fixed before the continual experiments were run and were not tuned afterwards; all strategies share them.
 
 ## Layout
 
@@ -287,7 +195,9 @@ src/polynomial_cl/
                     prefix-stable order), append_zero_coefficients (zero-init expansion), validate_degree
   metrics.py        SHARED: forgetting (best minus final), mean/std over seeds, tables, plus
                     array-level measures of the binary experiment (accuracy, old-score change, flips)
-  models/binary.py  binary logistic model on the raw float64 2-D monomial map
+  models/
+    binary.py       binary logistic model on the raw float64 2-D monomial map
+    multiclass.py   softmax-head semantics: logits, class-eligible prediction, zero-init expansion
   training/
     binary.py       gradient descent for the binary model (masks, per-coefficient rates, null space)
     multiclass.py   softmax head trainer: class masking, update masks, null-space projection, sampling
@@ -322,7 +232,7 @@ Run the scripts as `python experiments/<name>.py` from the repository root. Reus
 
 - Shared and binary code: `test_features` (ordering, counts, the shared enumeration and zero-expansion helpers, output-level expansion invariance for binary and multiclass), `test_binary_features`, `test_binary_expansion` (exact copy, zeros, identical scores and probabilities on train/eval/random/outside inputs, invariant checked every step of the loop), `test_binary_training` (finite-difference gradient, loss decrease, reproducibility, frozen coefficients, zero-init learning, per-coefficient learning rates, preservation tests, preset-override guard), `test_binary_replay`, `test_binary_data`, `test_binary_plotting`.
 - Synthetic data: `test_synthetic_data` (sinusoidal experiences bit-identical to the pre-refactor generator, circular target geometry, reproducibility, independent train/test streams, label noise), `test_joint_studies`.
-- Class-incremental code: `test_class_incremental` and `test_mnist` (features, expansion invariant and its guard, masked evaluation, forgetting definition, per-class accuracy, takeover versus flip diagnostics, determinism, offline Split MNIST), `test_multiclass_training`, `test_strategies` (the update restrictions of the six strategies), `test_class_incremental_plotting`, `test_reporting_rows`.
+- Class-incremental code: `test_class_incremental` and `test_mnist` (features, expansion invariant and its guard, masked evaluation, forgetting definition, per-class accuracy, takeover versus flip diagnostics, determinism, offline Split MNIST), `test_multiclass_model`, `test_multiclass_training`, `test_strategies` (the update restrictions of the six strategies), `test_class_incremental_plotting`, `test_reporting_rows`.
 - Per-degree rates and sampling: `test_per_degree` (vector validation, per-group parameter updates, zero rates, masks, Strategy B, expansion, class counts, no future-class draws, reproducibility, accuracy/forgetting).
 - Structure: `test_architecture` (import graph without cycles, class-incremental code independent of the binary code, entry points not importing each other, no stale imports in source, tests, experiments and notebooks).
 - Workflows: `test_experiment_scripts` (the command-line tools) and `test_notebooks` (every notebook compiles, has unique valid cell ids, is committed without outputs, reads no result file, and executes cleanly under `-m slow`).

@@ -85,14 +85,16 @@ def test_class_incremental_code_does_not_depend_on_binary_code():
     graph = _graph()
     forbidden = (
         "polynomial_cl.binary",
-        "polynomial_cl.models",
+        "polynomial_cl.models.binary",
         "polynomial_cl.training.binary",
     )
     for module in graph:
         if (
             module == CIL
             or module.startswith(CIL + ".")
-            or module.endswith(("training.multiclass", "plotting.continual"))
+            or module.endswith(
+                ("models.multiclass", "training.multiclass", "plotting.continual")
+            )
         ):
             reached = _closure(graph, module) | {module}
             bad = [r for r in reached if r.startswith(forbidden)]
