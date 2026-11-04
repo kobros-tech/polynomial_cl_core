@@ -3,6 +3,8 @@
 
 """Per-degree learning rates, class-balanced sampling, and the study protocol."""
 
+import inspect
+
 import numpy as np
 import pytest
 
@@ -11,9 +13,11 @@ from polynomial_cl.continual import (
     candidate_vectors,
     make_feature_data,
     make_task_plan,
+    run_comparison,
     run_condition,
     run_joint_reference,
     run_per_degree_study,
+    run_strategy_comparison,
 )
 from polynomial_cl.continual.degree_rates import (
     N_DEGREE_GROUPS,
@@ -31,7 +35,7 @@ from polynomial_cl.continual.features import (
     MAX_DEGREE,
     n_polynomial_features,
 )
-from polynomial_cl.continual.sampling import balanced_batches
+from polynomial_cl.continual.sampling import DEFAULT_SAMPLING, balanced_batches
 from polynomial_cl.data import make_synthetic_2d
 from polynomial_cl.training.multiclass import (
     fit_task,
@@ -284,7 +288,9 @@ def test_run_records_the_vector_and_applies_each_group_rate_after_expansion(tiny
 
 
 def test_different_rates_produce_independent_coefficient_changes(tiny_data):
-    run = _run(tiny_data, learning_rate=[0.2, 0.0, 0.2, 0.2])
+    # Shuffled batches: with balanced batches the first experience has an exactly zero
+    # constant-feature gradient at the zero initialisation, so its group may not move there.
+    run = _run(tiny_data, learning_rate=[0.2, 0.0, 0.2, 0.2], sampling="shuffled")
     change = run["degree_diagnostics"]["coef_change_l1"]
     assert all(row[1] == 0.0 for row in change)  # frozen linear group never moves
     assert all(row[0] > 0 for row in change)
@@ -413,8 +419,22 @@ def test_unknown_sampling_policy_is_rejected(tiny_data):
         _run(tiny_data, sampling="oversample")
 
 
-def test_shuffled_sampling_is_the_unchanged_default(tiny_data):
-    assert _run(tiny_data) == _run(tiny_data, sampling="shuffled")
+def test_class_balanced_is_the_default_and_shuffled_stays_available(tiny_data):
+    assert DEFAULT_SAMPLING == "class_balanced"
+    default = _run(tiny_data)
+    assert default == _run(tiny_data, sampling="class_balanced")
+    assert default["sampling"] == "class_balanced"
+    shuffled = _run(tiny_data, sampling="shuffled")
+    assert shuffled["sampling"] == "shuffled" and shuffled != default
+
+
+@pytest.mark.parametrize(
+    "function", [run_condition, run_comparison, run_strategy_comparison]
+)
+def test_no_experiment_function_hard_codes_a_sampling_policy(function):
+    assert (
+        inspect.signature(function).parameters["sampling"].default == DEFAULT_SAMPLING
+    )
 
 
 # -------------------------------------------- metrics and the study

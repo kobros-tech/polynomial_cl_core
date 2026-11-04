@@ -39,7 +39,7 @@ from .features import (
     scaled_polynomial_features,
 )
 from .replay import select_memory, stored_indices
-from .sampling import epoch_sampler
+from .sampling import DEFAULT_SAMPLING, epoch_sampler
 from .strategies import (
     N_REF_PER_CLASS,
     STRATEGIES,
@@ -321,7 +321,7 @@ def run_condition(
     strategy="ordinary",
     n_ref_per_class=N_REF_PER_CLASS,
     feature_power=0.0,
-    sampling="shuffled",
+    sampling=DEFAULT_SAMPLING,
 ):
     """Run one condition; returns a JSON-serialisable record with the accuracy matrix.
 
@@ -551,7 +551,7 @@ def run_comparison(
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
     feature_power=0.0,
-    sampling="shuffled",
+    sampling=DEFAULT_SAMPLING,
 ):
     """Run all three conditions for every seed; within a seed they share task order and replay.
 
@@ -591,7 +591,7 @@ def run_strategy_comparison(
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
     feature_power=0.0,
-    sampling="shuffled",
+    sampling=DEFAULT_SAMPLING,
 ):
     """Compare update rules on the ``expanding`` schedule; same task order and replay per seed."""
     if not len(seeds):

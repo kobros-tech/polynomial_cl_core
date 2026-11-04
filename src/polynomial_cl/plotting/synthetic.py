@@ -208,8 +208,12 @@ def plot_prediction_changes(
 
 
 # ------------------------------------------------------------ D. before / after
-def plot_step(record, experiences=None, res=160, figsize=(21, 4.2)):
-    """before expansion | right after expansion | after training | ground truth | prediction changes."""
+def plot_step(record, experiences=None, res=160, figsize=(21, 4.2), target=None):
+    """before expansion | right after expansion | after training | ground truth | prediction changes.
+
+    ``target`` is the function that generated the labels (default: the sinusoid); it is drawn in
+    every panel, so pass the one the experiences were made with, e.g. ``circular_target``.
+    """
     fig, axs = plt.subplots(1, 5, figsize=figsize)
     cur = experiences[record.t].test if experiences is not None else None
     samples = (cur.x, cur.y) if cur is not None else None
@@ -218,12 +222,14 @@ def plot_step(record, experiences=None, res=160, figsize=(21, 4.2)):
         axs[0],
         res,
         title=f"Exp {record.t + 1}: before expansion (deg {record.degree_before})",
+        target=target,
     )
     plot_predictions(
         record.model_expanded,
         axs[1],
         res,
         title=f"after expansion (deg {record.degree_after}), untrained",
+        target=target,
     )
     plot_predictions(
         record.model_after,
@@ -231,10 +237,16 @@ def plot_step(record, experiences=None, res=160, figsize=(21, 4.2)):
         res,
         samples=samples,
         title="after training (current test samples)",
+        target=target,
     )
-    plot_ground_truth(axs[3], res)
+    plot_ground_truth(axs[3], res, target=target)
     plot_prediction_changes(
-        record.model_before, record.model_after, axs[4], res, "before -> after training"
+        record.model_before,
+        record.model_after,
+        axs[4],
+        res,
+        "before -> after training",
+        target=target,
     )
     fig.tight_layout()
     return fig

@@ -22,6 +22,14 @@ import numpy as np
 
 SAMPLING_POLICIES = ("shuffled", "class_balanced")
 
+# The policy used when a caller does not name one. With replay, the stored examples of old
+# classes are a few hundred against thousands of new ones, so ``shuffled`` mini-batches are
+# dominated by the newest classes; ``class_balanced`` gives every class equal slots at the same
+# number of updates. ``per_degree_lr.py --experiment sampling`` runs the paired comparison.
+# Reproduce the earlier (shuffled) experiments with an explicit ``sampling="shuffled"`` or
+# ``--sampling shuffled``. Joint training has no replay and keeps its own shuffled epochs.
+DEFAULT_SAMPLING = "class_balanced"
+
 
 def balanced_batches(labels, n_updates, batch_size, rng):
     """Yield ``n_updates`` index batches with (near-)equal representation of every class.

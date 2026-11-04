@@ -7,8 +7,18 @@ entry points: they run as ``python experiments/<name>.py`` from the repository r
 this directory on ``sys.path``, and they import this module as ``common``.
 """
 
+from polynomial_cl.continual.sampling import DEFAULT_SAMPLING, SAMPLING_POLICIES
 from polynomial_cl.data import load_projected_mnist, make_synthetic_2d
 from polynomial_cl.data.mnist import N_COMPONENTS
+
+
+def add_sampling_argument(p):
+    p.add_argument(
+        "--sampling",
+        choices=SAMPLING_POLICIES,
+        default=DEFAULT_SAMPLING,
+        help="mini-batch policy; pass 'shuffled' to reproduce the earlier shuffled experiments",
+    )
 
 
 def add_dataset_arguments(p, required=True):

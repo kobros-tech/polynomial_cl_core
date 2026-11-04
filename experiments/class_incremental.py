@@ -12,7 +12,7 @@ import argparse
 import json
 from pathlib import Path
 
-from common import add_dataset_arguments, load_dataset
+from common import add_dataset_arguments, add_sampling_argument, load_dataset
 
 from polynomial_cl.continual import (
     TASK_ORDER,
@@ -45,6 +45,7 @@ def main():
         "--n-ref-per-class", type=int, default=N_REF_PER_CLASS, help="strategy_b only"
     )
     p.add_argument("--output", type=Path, required=True)
+    add_sampling_argument(p)
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     p.add_argument("--epochs", type=int, default=EPOCHS)
     p.add_argument("--lr", type=float, default=LEARNING_RATE)
@@ -81,6 +82,7 @@ def main():
         "batch_size": args.batch_size,
         "memory_per_class": args.memory_per_class,
         "feature_power": args.feature_power,
+        "sampling": args.sampling,
     }
     data = make_feature_data(train_x, train_y, test_x, test_y)
     if args.experiment == "strategies":
@@ -97,6 +99,7 @@ def main():
             "epochs_per_experience": args.epochs,
             "learning_rate": args.lr,
             "feature_power": args.feature_power,
+            "sampling": args.sampling,
             "batch_size": args.batch_size,
             "memory_per_class": args.memory_per_class,
             "experiment": args.experiment,

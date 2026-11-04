@@ -13,7 +13,7 @@ import argparse
 import json
 from pathlib import Path
 
-from common import add_dataset_arguments, load_dataset
+from common import add_dataset_arguments, add_sampling_argument, load_dataset
 
 from polynomial_cl.continual import (
     holdout_split,
@@ -37,6 +37,7 @@ def main():
         "--experiment", choices=("conditions", "strategies"), default="conditions"
     )
     p.add_argument("--output", type=Path, required=True)
+    add_sampling_argument(p)
     p.add_argument("--powers", nargs="+", type=float, default=[0, 1, 2, 3])
     p.add_argument("--lrs", nargs="+", type=float, default=[0.01, 0.03, 0.1, 0.3, 1.0])
     p.add_argument(
@@ -82,6 +83,7 @@ def main():
             learning_rate=lr,
             memory_per_class=args.memory_per_class,
             feature_power=power,
+            sampling=args.sampling,
             **extra,
         )["summary"]
 

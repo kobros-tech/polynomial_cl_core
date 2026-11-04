@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Mohamed Alkobrosli
 # SPDX-License-Identifier: MIT
 
+from unittest import mock
+
 import matplotlib
 
 matplotlib.use("Agg")
@@ -9,6 +11,7 @@ import numpy as np
 
 from polynomial_cl.binary.data import make_experiences
 from polynomial_cl.binary.experiment import make_config, run_continual
+from polynomial_cl.data import circular_target
 from polynomial_cl.models.binary import PolynomialLogisticModel
 from polynomial_cl.plotting import synthetic as P
 
@@ -114,3 +117,19 @@ def test_accuracy_vs_budget_has_one_line_per_degree_and_loss_curves_can_overlay(
         "degree 2",
     ]
     plt.close(ax.figure)
+
+
+def test_plot_step_draws_the_target_that_generated_the_data_in_every_panel():
+    exps = make_experiences(
+        n_train=60, n_test=80, seed=0, target_function=circular_target
+    )
+    config = make_config(
+        "ordinary", epochs=5, m_current=40, m_replay=40, capacity=40, stop_after=2
+    )
+    rec = run_continual(exps, config).records[-1]
+    for target, expected in ((circular_target, circular_target), (None, None)):
+        with mock.patch.object(P, "_truth_line", wraps=P._truth_line) as truth_line:
+            P.plot_step(rec, exps, res=30, target=target)
+        assert truth_line.call_count == 5  # three predictions, ground truth, changes
+        assert all(call.args[1] is expected for call in truth_line.call_args_list)
+        plt.close("all")
