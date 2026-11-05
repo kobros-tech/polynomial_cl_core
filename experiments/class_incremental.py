@@ -3,25 +3,25 @@
 """Class-incremental comparison (fixed_linear / expanding / fixed_capacity) -> JSON.
 
 Datasets: ``synthetic_2d`` (ten Gaussian classes on a ring) or ``split_mnist`` (MNIST digits
-under a fixed 16-dimensional random projection). See polynomial_cl/class_incremental/experiment.py
+under a fixed 16-dimensional random projection). See polynomial_cl/continual/experiment.py
 for the protocol; all logic lives in the package, this script only parses arguments and
-writes the result.
+writes the result. Argument and dataset helpers shared with the other runners: common.py.
 """
 
 import argparse
 import json
 from pathlib import Path
 
-from polynomial_cl.class_incremental import (
+from common import add_dataset_arguments, add_sampling_argument, load_dataset
+
+from polynomial_cl.continual import (
+    TASK_ORDER,
     holdout_split,
-    load_projected_mnist,
     make_feature_data,
-    make_synthetic_2d,
     run_comparison,
     run_strategy_comparison,
 )
-from polynomial_cl.class_incremental.data import N_COMPONENTS, TASK_ORDER
-from polynomial_cl.class_incremental.experiment import (
+from polynomial_cl.continual.experiment import (
     BATCH_SIZE,
     DEGREES,
     EPOCHS,
@@ -30,55 +30,6 @@ from polynomial_cl.class_incremental.experiment import (
     N_REF_PER_CLASS,
     STRATEGIES,
 )
-
-
-def add_dataset_arguments(p):
-    p.add_argument("--dataset", choices=("synthetic_2d", "split_mnist"), required=True)
-    mnist = p.add_argument_group("split_mnist")
-    mnist.add_argument("--data-dir", default="data/mnist")
-    mnist.add_argument("--projection-seed", type=int, default=0)
-    mnist.add_argument(
-        "--no-download",
-        dest="download",
-        action="store_false",
-        help="require the MNIST archives to exist locally; never touch the network",
-    )
-    synthetic = p.add_argument_group("synthetic_2d")
-    synthetic.add_argument("--data-seed", type=int, default=0)
-    synthetic.add_argument("--train-per-class", type=int, default=160)
-    synthetic.add_argument("--test-per-class", type=int, default=240)
-    synthetic.add_argument("--separation", type=float, default=2.5)
-    synthetic.add_argument("--noise", type=float, default=0.45)
-
-
-def load_dataset(args):
-    """Arrays (train_x, train_y, test_x, test_y) plus a JSON-able description of the data."""
-    if args.dataset == "synthetic_2d":
-        train_x, train_y, test_x, test_y, means = make_synthetic_2d(
-            args.data_seed,
-            args.train_per_class,
-            args.test_per_class,
-            args.separation,
-            args.noise,
-        )
-        settings = {
-            "data_seed": args.data_seed,
-            "train_per_class": args.train_per_class,
-            "test_per_class": args.test_per_class,
-            "class_separation": args.separation,
-            "class_noise_std": args.noise,
-            "class_means": means.tolist(),
-        }
-    else:
-        train_x, train_y, test_x, test_y = load_projected_mnist(
-            args.data_dir, args.projection_seed, download=args.download
-        )
-        settings = {
-            "projection_seed": args.projection_seed,
-            "projection_dimensions": N_COMPONENTS,
-            "projection": "fixed orthonormal random projection; no data fitting",
-        }
-    return train_x, train_y, test_x, test_y, settings
 
 
 def main():
@@ -94,6 +45,7 @@ def main():
         "--n-ref-per-class", type=int, default=N_REF_PER_CLASS, help="strategy_b only"
     )
     p.add_argument("--output", type=Path, required=True)
+    add_sampling_argument(p)
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     p.add_argument("--epochs", type=int, default=EPOCHS)
     p.add_argument("--lr", type=float, default=LEARNING_RATE)
@@ -130,6 +82,7 @@ def main():
         "batch_size": args.batch_size,
         "memory_per_class": args.memory_per_class,
         "feature_power": args.feature_power,
+        "sampling": args.sampling,
     }
     data = make_feature_data(train_x, train_y, test_x, test_y)
     if args.experiment == "strategies":
@@ -146,6 +99,7 @@ def main():
             "epochs_per_experience": args.epochs,
             "learning_rate": args.lr,
             "feature_power": args.feature_power,
+            "sampling": args.sampling,
             "batch_size": args.batch_size,
             "memory_per_class": args.memory_per_class,
             "experiment": args.experiment,

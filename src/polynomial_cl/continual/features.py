@@ -8,8 +8,9 @@ experiments (``polynomial_cl.features``). What is specific here is the *scaling*
 positive-degree group is divided by the square root of its size, so that higher-degree
 groups do not dominate merely because they contain more monomials, whereas the binary
 experiments use raw monomials. Monomials are ordered by total degree, so the features of
-degree d are a prefix of those of degree d + 1; a model can grow by appending zero
-coefficients without changing its outputs.
+degree d are a prefix of those of degree d + 1; a head can grow by appending zero
+coefficients (``polynomial_cl.models.multiclass.expand_weights``) without changing its
+outputs.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import math
 
 import numpy as np
 
-from ..features import append_zero_coefficients, monomial_exponents
+from ..features import monomial_exponents
 
 MAX_DEGREE = 3
 
@@ -57,13 +58,3 @@ def scaled_polynomial_features(
         powers = np.power(block[:, None, :], exponents[None, :, :])
         out[start : start + len(block)] = np.prod(powers, axis=2) * scales
     return out
-
-
-def expand_weights(weights: np.ndarray, new_feature_count: int) -> np.ndarray:
-    """Append zero coefficient rows; every existing logit is preserved exactly.
-
-    Returns ``weights`` itself when no rows are added, otherwise a new array.
-    """
-    if new_feature_count == weights.shape[0]:
-        return weights
-    return append_zero_coefficients(weights, new_feature_count)

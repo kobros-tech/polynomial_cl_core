@@ -5,15 +5,73 @@
 
 f_d(x) = w . phi_d(x).  The bias is the coefficient of the constant feature (w[0]); it is
 not stored separately, so it can never be counted twice.
+
+The feature map is the *raw* 2-D monomial map in float64 (x1^i * x2^j). It shares only the
+monomial enumeration and the zero-coefficient expansion with the class-incremental code
+(``polynomial_cl.features``); the class-incremental setting uses its own degree-scaled map
+(``polynomial_cl.continual.features``) and the softmax head of
+``polynomial_cl.models.multiclass`` instead of this model.
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from .features import PolynomialFeatures, append_zero_coefficients
+from ..features import append_zero_coefficients, monomial_exponents, validate_degree
 
 
+# ------------------------------------------------------------ 2-D raw feature map
+def feature_exponents(degree: int):
+    """List of (i, j) meaning x1^i * x2^j, in the canonical order."""
+    degree = validate_degree(degree)
+    return [(int(i), int(j)) for i, j in monomial_exponents(2, degree)]
+
+
+def _name(i: int, j: int) -> str:
+    parts = []
+    for var, p in (("x1", i), ("x2", j)):
+        if p == 1:
+            parts.append(var)
+        elif p > 1:
+            parts.append(f"{var}^{p}")
+    return "*".join(parts) if parts else "1"
+
+
+def feature_names(degree: int):
+    return [_name(i, j) for i, j in feature_exponents(degree)]
+
+
+def n_features(degree: int) -> int:
+    degree = validate_degree(degree)
+    return (degree + 1) * (degree + 2) // 2
+
+
+def polynomial_features(x, degree: int) -> np.ndarray:
+    """Design matrix Phi_d(x) of shape (n, n_features(degree))."""
+    degree = validate_degree(degree)
+    x = np.atleast_2d(np.asarray(x, dtype=float))
+    if x.shape[1] != 2:
+        raise ValueError("expected inputs of shape (n, 2)")
+    p = np.arange(degree + 1)
+    p1 = x[:, :1] ** p  # (n, d+1): x1^0..x1^d
+    p2 = x[:, 1:] ** p
+    return np.column_stack([p1[:, i] * p2[:, j] for i, j in feature_exponents(degree)])
+
+
+class PolynomialFeatures:
+    """Small convenience wrapper exposing degree, names, and feature count."""
+
+    def __init__(self, degree: int):
+        self.degree = validate_degree(degree)
+        self.exponents = feature_exponents(self.degree)
+        self.names = feature_names(self.degree)
+        self.n_features = len(self.names)
+
+    def __call__(self, x):
+        return polynomial_features(x, self.degree)
+
+
+# ------------------------------------------------------------ the model
 def sigmoid(z):
     """Numerically stable logistic function."""
     z = np.asarray(z, dtype=float)

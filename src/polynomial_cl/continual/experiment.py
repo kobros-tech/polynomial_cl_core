@@ -22,7 +22,11 @@ import numpy as np
 
 from ..metrics import forgetting as forgetting_from_matrix
 from ..metrics import mean_std_by_condition
-from .data import TASK_ORDER
+from ..models.multiclass import expand_weights, logits, predict
+from ..training.multiclass import (
+    cross_entropy,
+    fit_task,
+)
 from .degree_rates import (
     N_DEGREE_GROUPS,
     as_degree_rates,
@@ -31,12 +35,19 @@ from .degree_rates import (
 )
 from .features import (
     MAX_DEGREE,
-    expand_weights,
     n_polynomial_features,
     scaled_polynomial_features,
 )
-from .training import SAMPLING_POLICIES, cross_entropy, fit_task, null_space_basis
+from .replay import select_memory, stored_indices
+from .sampling import DEFAULT_SAMPLING, epoch_sampler
+from .strategies import (
+    N_REF_PER_CLASS,
+    STRATEGIES,
+    update_restrictions,
+)
 
+# Ten classes arrive in five two-class experiences, in this order.
+TASK_ORDER = ((0, 1), (2, 3), (4, 5), (6, 7), (8, 9))
 CONDITIONS = ("fixed_linear", "expanding", "fixed_capacity")
 DEGREES = {
     "fixed_linear": (1, 1, 1, 1, 1),
@@ -45,25 +56,6 @@ DEGREES = {
 }
 SUMMARY_METRICS = ("final_mean_accuracy", "final_current_accuracy", "mean_forgetting")
 
-# Update rules compared on the ``expanding`` schedule (same definitions as the binary
-# experiments in polynomial_cl.training). A coefficient is "old" if it existed before the
-# current experience: its feature row was already present AND its class column was already
-# introduced. New feature rows and the new classes' columns always train freely.
-# ``strategy_b`` is the binary ``strategy_b_all`` (every coefficient may move inside the null
-# space of the reference inputs); ``strategy_b_new`` is the binary ``strategy_b_new``: old
-# coefficients are frozen and only new ones move, also inside that null space.
-STRATEGIES = (
-    "ordinary",
-    "ordinary_no_replay",
-    "small_old_lr",
-    "frozen_old",
-    "strategy_b",
-    "strategy_b_new",
-)
-OLD_LR_FACTOR = 0.1
-N_REF_PER_CLASS = (
-    3  # strategy_b: reference inputs per old class (first stored replay examples)
-)
 STRATEGY_METRICS = (
     *SUMMARY_METRICS,
     "mean_old_logit_change",
@@ -82,7 +74,7 @@ MEMORY_PER_CLASS = 200
 EXPANSION_TOLERANCE = 1e-5
 
 
-def expansion_tolerance(logits):
+def expansion_tolerance(class_logits):
     """Allowed logit change when zero coefficients are appended.
 
     Appending zeros is exact in real arithmetic; in float32 the same logits are summed with a
@@ -90,7 +82,7 @@ def expansion_tolerance(logits):
     large logits). The bound is EXPANSION_TOLERANCE for logits of order 1 and relative above
     that, which still rejects any non-zero new coefficient.
     """
-    return EXPANSION_TOLERANCE * max(1.0, float(np.max(np.abs(logits))))
+    return EXPANSION_TOLERANCE * max(1.0, float(np.max(np.abs(class_logits))))
 
 
 class FeatureData(NamedTuple):
@@ -114,6 +106,24 @@ def make_feature_data(train_x, train_y, test_x, test_y) -> FeatureData:
     )
 
 
+def holdout_split(train_x, train_y, fraction, seed=123):
+    """Random split of the training data into (train, validation) arrays.
+
+    Use the validation part, never the test set, to choose hyper-parameters.
+    """
+    if not 0 < fraction < 1:
+        raise ValueError("fraction must be between 0 and 1")
+    order = np.random.default_rng(seed).permutation(len(train_x))
+    cut = len(train_x) - round(fraction * len(train_x))
+    fit, held = order[:cut], order[cut:]
+    for part, name in ((fit, "training"), (held, "validation")):
+        if len(np.unique(train_y[part])) != len(np.unique(train_y)):
+            raise ValueError(
+                f"the {name} part is missing a class; use more data or another fraction"
+            )
+    return train_x[fit], train_y[fit], train_x[held], train_y[held]
+
+
 def make_task_plan(labels, seed, memory_per_class):
     """Shuffled training indices per experience, and one fixed replay memory per class."""
     if memory_per_class < 1:
@@ -126,26 +136,26 @@ def make_task_plan(labels, seed, memory_per_class):
             raise ValueError(f"training data is missing task classes {classes}")
         tasks.append(indices[rng.permutation(len(indices))])
         for class_id in classes:
-            candidates = np.flatnonzero(labels == class_id)
-            if len(candidates) == 0:
-                raise ValueError(f"training data is missing class {class_id}")
-            memory[class_id] = rng.choice(
-                candidates, min(memory_per_class, len(candidates)), replace=False
-            )
+            memory[class_id] = select_memory(labels, class_id, memory_per_class, rng)
     return tasks, memory
 
 
-def accuracy_by_task(weights, test_x, test_y, n_tasks_seen):
+def accuracy_by_task(weights, test_x, test_y, n_tasks_seen, by_class=None):
     """Accuracy on every experience seen so far (NaN for later ones).
 
-    Predictions are the argmax over the classes introduced so far only.
+    Predictions are the argmax over the classes introduced so far only. If ``by_class`` (an
+    array of 10 NaNs) is given, it is filled with the per-class accuracy from the same
+    predictions (no extra forward pass); classes not introduced yet stay NaN.
     """
     accuracy = np.full(len(TASK_ORDER), np.nan)
     for task, classes in enumerate(TASK_ORDER[:n_tasks_seen]):
         rows = np.flatnonzero(np.isin(test_y, classes))
-        logits = test_x[rows] @ weights
-        predictions = logits[:, : 2 * n_tasks_seen].argmax(axis=1)
+        predictions = predict(logits(weights, test_x[rows]), 2 * n_tasks_seen)
         accuracy[task] = np.mean(predictions == test_y[rows])
+        if by_class is not None:
+            for c in classes:
+                of_class = test_y[rows] == c
+                by_class[c] = np.mean(predictions[of_class] == c)
     return accuracy
 
 
@@ -217,18 +227,18 @@ def _record_indicators(
     if task:
         x = data.test_x[old_test, :count]
         old_before, old_after = (
-            x @ before[:, :old_classes],
-            x @ weights[:, :old_classes],
+            logits(before, x, old_classes),
+            logits(weights, x, old_classes),
         )
         out["old_logit_change_by_task"].append(
             float(np.max(np.abs(old_after - old_before)))
         )
-        flips = old_before.argmax(axis=1) != old_after.argmax(axis=1)
+        flips = predict(old_before) != predict(old_after)
         out["old_flip_fraction_by_task"].append(float(flips.mean()))
         # The flip diagnostic above only lets old classes compete, so it cannot see a new
         # class taking over an old example while the old logits barely move. Here every
         # class seen so far competes, exactly as in the accuracy matrix.
-        predicted = (x @ weights[:, :n_seen]).argmax(axis=1)
+        predicted = predict(logits(weights, x, n_seen))
         out["old_takeover_fraction_by_task"].append(
             float((predicted >= old_classes).mean())
         )
@@ -311,7 +321,7 @@ def run_condition(
     strategy="ordinary",
     n_ref_per_class=N_REF_PER_CLASS,
     feature_power=0.0,
-    sampling="shuffled",
+    sampling=DEFAULT_SAMPLING,
 ):
     """Run one condition; returns a JSON-serialisable record with the accuracy matrix.
 
@@ -328,8 +338,7 @@ def run_condition(
         raise ValueError(f"unknown condition: {condition}")
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy: {strategy}")
-    if sampling not in SAMPLING_POLICIES:
-        raise ValueError(f"unknown sampling policy: {sampling}")
+    sampler = epoch_sampler(sampling)
     per_degree = np.ndim(learning_rate) > 0
     if per_degree and feature_power:
         raise ValueError(
@@ -342,6 +351,9 @@ def run_condition(
         (n_polynomial_features(data.n_components, degrees[0]), 10), np.float32
     )
     matrix = np.full((n_tasks, n_tasks), np.nan)
+    class_matrix = np.full(
+        (n_tasks, 10), np.nan
+    )  # accuracy of each class after each experience
     feature_counts, expansion_changes = [], []
     indicators = {k: [] for k in INDICATORS}
     degree_diag = {k: [] for k in DEGREE_DIAGNOSTICS}
@@ -367,7 +379,7 @@ def run_condition(
         old_classes = 2 * task
         n_seen = 2 * (task + 1)
         if task and strategy != "ordinary_no_replay":
-            replay = np.concatenate([memory_indices[c] for c in range(old_classes)])
+            replay = stored_indices(memory_indices, old_classes)
         else:
             replay = np.empty(0, dtype=np.int64)
         train_x = np.concatenate(
@@ -392,43 +404,20 @@ def run_condition(
             step_scale = (
                 group_scale if feature_scale is None else feature_scale * group_scale
             )
-        scale = null_basis = refs = null_groups = None
-        if strategy in ("frozen_old", "small_old_lr"):
-            scale = np.ones(weights.shape, np.float32)
-            scale[:old_rows, :old_classes] = (
-                0.0 if strategy == "frozen_old" else OLD_LR_FACTOR
-            )
-        elif strategy == "strategy_b_new" and task:
-            scale = np.ones(weights.shape, np.float32)
-            scale[:old_rows, :old_classes] = 0.0
-            refs = np.concatenate(
-                [memory_indices[c][:n_ref_per_class] for c in range(old_classes)]
-            )
-            ref_design = data.train_x[refs, :count]
-            if step_scale is not None:
-                ref_design = ref_design * np.sqrt(step_scale)
-            # Old-class columns may only move through the NEW feature rows; the null space is
-            # taken inside those rows. New-class columns see every row (nothing there is old),
-            # as in strategy_b, so reference inputs also keep their new-class logits.
-            rows = np.arange(old_rows, count)
-            old_basis = np.zeros((count, 0), np.float32)
-            if len(rows):
-                old_basis = np.zeros(
-                    (count, null_space_basis(ref_design[:, rows]).shape[1]), np.float32
-                )
-                old_basis[rows] = null_space_basis(ref_design[:, rows])
-            null_groups = [
-                (slice(0, old_classes), old_basis),
-                (slice(old_classes, n_seen), null_space_basis(ref_design)),
-            ]
-        elif strategy == "strategy_b" and task:
-            refs = np.concatenate(
-                [memory_indices[c][:n_ref_per_class] for c in range(old_classes)]
-            )
-            ref_design = data.train_x[refs, :count]
-            if step_scale is not None:
-                ref_design = ref_design * np.sqrt(step_scale)
-            null_basis = null_space_basis(ref_design)
+        restrictions = update_restrictions(
+            strategy,
+            weights_shape=weights.shape,
+            old_rows=old_rows,
+            old_classes=old_classes,
+            n_seen=n_seen,
+            count=count,
+            task=task,
+            train_x=data.train_x,
+            memory_indices=memory_indices,
+            n_ref_per_class=n_ref_per_class,
+            step_scale=step_scale,
+        )
+        scale, null_basis, refs, null_groups = restrictions
         old_test = np.flatnonzero(data.test_y < old_classes)
         before = weights.copy()
         loss_before = cross_entropy(weights, train_x, train_y, n_seen)
@@ -450,7 +439,7 @@ def run_condition(
             feature_scale=feature_scale,
             group_scale=group_scale,
             group_index=group_index,
-            sampling=sampling,
+            epoch_sampler=sampler,
             stats=fit_stats,
         )
         effective = (
@@ -488,7 +477,11 @@ def run_condition(
             step_scale=step_scale, null_groups=null_groups,
         )  # fmt: skip
         matrix[task, : task + 1] = accuracy_by_task(
-            weights, data.test_x[:, :count], data.test_y, task + 1
+            weights,
+            data.test_x[:, :count],
+            data.test_y,
+            task + 1,
+            by_class=class_matrix[task],
         )[: task + 1]
 
     # Forgetting of an experience: best accuracy it ever had minus its final accuracy
@@ -503,6 +496,9 @@ def run_condition(
         "expansion_max_logit_changes": expansion_changes,
         "accuracy_matrix": [
             [float(v) if np.isfinite(v) else None for v in row] for row in matrix
+        ],
+        "accuracy_by_class_matrix": [
+            [float(v) if np.isfinite(v) else None for v in row] for row in class_matrix
         ],
         "final_mean_accuracy": float(np.nanmean(matrix[-1])),
         "final_current_accuracy": float(matrix[-1, -1]),
@@ -555,7 +551,7 @@ def run_comparison(
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
     feature_power=0.0,
-    sampling="shuffled",
+    sampling=DEFAULT_SAMPLING,
 ):
     """Run all three conditions for every seed; within a seed they share task order and replay.
 
@@ -595,7 +591,7 @@ def run_strategy_comparison(
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
     feature_power=0.0,
-    sampling="shuffled",
+    sampling=DEFAULT_SAMPLING,
 ):
     """Compare update rules on the ``expanding`` schedule; same task order and replay per seed."""
     if not len(seeds):
@@ -652,7 +648,7 @@ def run_joint_reference(
         batch_size=batch_size,
         seed=seed,
     )
-    predictions = (data.test_x[:, :count] @ weights).argmax(axis=1)
+    predictions = predict(logits(weights, data.test_x[:, :count]))
     per_class = [float(np.mean(predictions[data.test_y == c] == c)) for c in range(10)]
     return {
         "degree": degree,
@@ -667,3 +663,174 @@ def run_joint_reference(
             cross_entropy(weights, data.train_x[:, :count], labels, 10),
         ],
     }
+
+
+def run_joint_comparison(
+    data: FeatureData, degrees, epochs_list, seeds, learning_rate=LEARNING_RATE
+):
+    """``run_joint_reference`` over degrees x epochs x seeds, summarised over the seeds.
+
+    A reference condition, not a continual-learning strategy: no forgetting is computed.
+    """
+    rows = []
+    for degree in degrees:
+        for epochs in epochs_list:
+            runs = [
+                run_joint_reference(
+                    data,
+                    degree=degree,
+                    seed=s,
+                    epochs=epochs,
+                    learning_rate=learning_rate,
+                )
+                for s in seeds
+            ]
+            accs = [r["test_accuracy"] for r in runs]
+            rows.append(
+                {
+                    "degree": degree,
+                    "epochs": epochs,
+                    "learning_rate": float(learning_rate),
+                    "n_features": runs[0]["n_features"],
+                    "seeds": list(seeds),
+                    "test_accuracy_by_seed": accs,
+                    "test_accuracy_mean": float(np.mean(accs)),
+                    "test_accuracy_std": float(np.std(accs, ddof=1))
+                    if len(accs) > 1
+                    else None,
+                    "per_class_accuracy_mean": [
+                        float(v)
+                        for v in np.mean(
+                            [r["per_class_accuracy"] for r in runs], axis=0
+                        )
+                    ],
+                }
+            )
+    return rows
+
+
+# ---------------------------------------------------------------- reporting helpers
+def summary_rows(result, key="condition", metric_names=None):
+    """Table rows (mean +/- std over seeds) from the ``summary`` of a comparison result."""
+    rows = []
+    for name, stats in result["summary"].items():
+        chosen = metric_names or tuple(stats)
+        rows.append(
+            {
+                key: name,
+                **{
+                    m: f"{stats[m]['mean']:.3f}+/-{stats[m]['std']:.3f}" for m in chosen
+                },
+            }
+        )
+    return rows
+
+
+def old_class_rows(run):
+    """Per experience (from the 2nd on): how training affected the old classes' test inputs."""
+    return [
+        {
+            "after_experience": t + 1,
+            "taken_by_new_class": f"{run['old_takeover_fraction_by_task'][t]:.3f}",
+            "flipped_among_old": f"{run['old_flip_fraction_by_task'][t]:.3f}",
+            "max_old_logit_change": f"{run['old_logit_change_by_task'][t]:.2f}",
+        }
+        for t in range(1, len(run["accuracy_matrix"]))
+    ]
+
+
+def _dash(value):
+    return "-" if value is None else value
+
+
+def strategy_diagnostic_rows(run):
+    """Per experience: loss, trainable coefficients and Strategy B null-space sizes of one run.
+
+    ``null_dim`` is the dimension of the allowed update space for the old-class columns and
+    ``null_dim_new`` for the new-class columns (``-`` where the strategy has no null-space constraint).
+    """
+    return [
+        {
+            "experience": t + 1,
+            "loss_before": f"{before:.2f}",
+            "loss_after": f"{after:.2f}",
+            "n_trainable": run["n_trainable_by_task"][t],
+            "null_dim": _dash(run["null_dim_by_task"][t]),
+            "null_dim_new": _dash(run["null_dim_new_class_columns_by_task"][t]),
+            "l1_update": f"{run['l1_update_by_task'][t]:.2f}",
+        }
+        for t, (before, after) in enumerate(run["train_loss_by_task"])
+    ]
+
+
+def sampling_rows(sampling):
+    """Examples processed and repetition per sampling policy and strategy (mean over seeds).
+
+    ``sampling`` is the output of ``run_sampling_comparison``. ``draws_per_example`` is, for
+    the last experience, how often each stored example of the least- and most-drawn class was
+    used (1 per epoch for ``shuffled``); classes with an empty pool are ignored.
+    """
+    rows = []
+    for policy, result in sampling.items():
+        for strategy in result["summary"]:
+            runs = [r for r in result["runs"] if r["strategy"] == strategy]
+            last = [r["sampling_by_task"][-1] for r in runs]
+            per_example = []
+            for log in last:
+                pool = np.array(log["pool_sizes_by_class"], dtype=float)
+                drawn = np.array(log["samples_drawn_by_class"], dtype=float)
+                per_example.append(drawn[pool > 0] / pool[pool > 0])
+            rows.append(
+                {
+                    "sampling": policy,
+                    "strategy": strategy,
+                    "examples_processed": int(
+                        np.mean(
+                            [
+                                sum(
+                                    t["examples_processed"]
+                                    for t in r["sampling_by_task"]
+                                )
+                                for r in runs
+                            ]
+                        )
+                    ),
+                    "examples_available": int(
+                        np.mean(
+                            [
+                                sum(
+                                    t["examples_available"]
+                                    for t in r["sampling_by_task"]
+                                )
+                                for r in runs
+                            ]
+                        )
+                    ),
+                    "updates": int(
+                        np.mean(
+                            [
+                                sum(t["n_updates"] for t in r["sampling_by_task"])
+                                for r in runs
+                            ]
+                        )
+                    ),
+                    "draws_per_example_min": f"{np.mean([v.min() for v in per_example]):.2f}",
+                    "draws_per_example_max": f"{np.mean([v.max() for v in per_example]):.2f}",
+                }
+            )
+    return rows
+
+
+def per_seed_rows(runs_by_label, key="method"):
+    """One row per (label, seed): final mean accuracy, newest-experience accuracy, forgetting."""
+    return [
+        {
+            key: label,
+            "seed": run["seed"],
+            "final_mean_accuracy": f"{run['final_mean_accuracy']:.3f}",
+            "final_current_accuracy": f"{run['final_current_accuracy']:.3f}",
+            "mean_forgetting": f"{run['mean_forgetting']:.3f}",
+        }
+        for label, runs in runs_by_label.items()
+        for run in runs
+    ]

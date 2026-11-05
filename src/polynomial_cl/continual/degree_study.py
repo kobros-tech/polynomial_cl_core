@@ -504,3 +504,71 @@ def run_epoch_robustness(
             }
         )
     return {"epochs": epochs, "test_seeds": seeds, "cells": cells}
+
+
+def degree_group_rows(run):
+    """One row per (experience, active degree group) of one run: rate, size and actual change.
+
+    ``trainable`` counts the coefficients that can move; a group whose rate is zero has none,
+    and its measured ``coef_change_l1`` is exactly 0.
+    """
+    d = run["degree_diagnostics"]
+    rows = []
+    for task, groups in enumerate(d["lr"]):
+        for degree, rate in enumerate(groups):
+            if rate is None:
+                continue
+            rows.append(
+                {
+                    "experience": task + 1,
+                    "degree": degree,
+                    "rate": rate,
+                    "coefficients": d["n_coefficients"][task][degree],
+                    "trainable": d["n_trainable"][task][degree],
+                    "coef_change_l1": d["coef_change_l1"][task][degree],
+                }
+            )
+    return rows
+
+
+def study_rows(study):
+    """Rows for the shared-rate and the selected vector of every cell of a per-degree study.
+
+    ``*`` marks the vector selected on validation data and ``^`` a vector on the validation
+    Pareto front of accuracy and forgetting.
+    """
+    rows = []
+    for cell in study["cells"]:
+        for name, runs in cell["runs"].items():
+            if name not in ("shared", cell["selected"]):
+                continue
+            s = vector_summary(runs)
+            rows.append(
+                {
+                    "sampling": cell["sampling"][:5],
+                    "strategy": cell["strategy"],
+                    "vector": name
+                    + ("*" if name == cell["selected"] else "")
+                    + ("^" if name in cell["pareto"] else ""),
+                    "rates d0..d3": " ".join(f"{v:g}" for v in cell["vectors"][name]),
+                    "acc": f"{s['final_mean_accuracy']['mean']:.3f}+/-{s['final_mean_accuracy']['std']:.3f}",
+                    "newest": f"{s['final_current_accuracy']['mean']:.3f}",
+                    "forget": f"{s['mean_forgetting']['mean']:.3f}",
+                    "takeover": f"{s['mean_old_takeover_fraction']['mean']:.3f}",
+                    "flips": f"{s['mean_old_flip_fraction']['mean']:.3f}",
+                }
+            )
+    return rows
+
+
+def study_pairs(study):
+    """``{label: (runs, sampling)}`` for the shared and selected vector of every study cell."""
+    pairs = {}
+    for cell in study["cells"]:
+        tag = f"{cell['strategy']}/{cell['sampling'][:5]}"
+        pairs[f"{tag} shared"] = (cell["runs"]["shared"], cell["sampling"])
+        pairs[f"{tag} {cell['selected']}"] = (
+            cell["runs"][cell["selected"]],
+            cell["sampling"],
+        )
+    return pairs

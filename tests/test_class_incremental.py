@@ -4,29 +4,29 @@
 import numpy as np
 import pytest
 
-from polynomial_cl.class_incremental import (
+from polynomial_cl.continual import (
     CONDITIONS,
     STRATEGIES,
     TASK_ORDER,
     holdout_split,
     make_feature_data,
-    make_synthetic_2d,
     make_task_plan,
     run_comparison,
     run_condition,
     run_strategy_comparison,
     summarize_runs,
 )
-from polynomial_cl.class_incremental import experiment as experiment_module
-from polynomial_cl.class_incremental.data import make_projection, project_images
-from polynomial_cl.class_incremental.experiment import accuracy_by_task
-from polynomial_cl.class_incremental.features import (
-    expand_weights,
+from polynomial_cl.continual import experiment as experiment_module
+from polynomial_cl.continual.experiment import accuracy_by_task
+from polynomial_cl.continual.features import (
     monomial_exponents,
     n_polynomial_features,
     scaled_polynomial_features,
 )
-from polynomial_cl.class_incremental.training import (
+from polynomial_cl.data import make_synthetic_2d
+from polynomial_cl.data.mnist import make_projection, project_images
+from polynomial_cl.models.multiclass import expand_weights
+from polynomial_cl.training.multiclass import (
     cross_entropy,
     fit_task,
     null_space_basis,
@@ -563,3 +563,29 @@ def test_feature_power_runs_for_every_strategy_and_zero_is_the_default(tiny_data
             assert (
                 max(c for c in run["ref_logit_change_by_task"] if c is not None) <= 1e-4
             )
+
+
+def test_per_class_accuracy_comes_from_the_same_predictions_as_the_task_accuracy():
+    x_train, y_train, x_test, y_test, _ = make_synthetic_2d(
+        0, n_train_per_class=30, n_test_per_class=20
+    )
+    data = make_feature_data(x_train, y_train, x_test, y_test)
+    run = run_condition(
+        "expanding", data, *make_task_plan(y_train, 0, 10), seed=0, epochs=2
+    )
+    by_class = np.array(
+        [
+            [np.nan if v is None else v for v in row]
+            for row in run["accuracy_by_class_matrix"]
+        ]
+    )
+    matrix = np.array(
+        [[np.nan if v is None else v for v in row] for row in run["accuracy_matrix"]]
+    )
+    assert by_class.shape == (5, 10)
+    for t in range(5):  # classes appear in their own experience and never earlier
+        assert np.isfinite(by_class[t, : 2 * (t + 1)]).all()
+        assert np.isnan(by_class[t, 2 * (t + 1) :]).all()
+        # both classes of an experience have equal test counts, so their mean is the task accuracy
+        for task, classes in enumerate(TASK_ORDER[: t + 1]):
+            assert np.mean(by_class[t, list(classes)]) == pytest.approx(matrix[t, task])

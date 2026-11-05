@@ -4,9 +4,9 @@
 import numpy as np
 import pytest
 
-from polynomial_cl.data import make_experiences
-from polynomial_cl.replay import ReplayBuffer, build_batch
-from polynomial_cl.training import make_config, run_continual
+from polynomial_cl.binary.data import make_experiences
+from polynomial_cl.binary.experiment import make_config, run_continual
+from polynomial_cl.binary.replay import ReplayBuffer, build_batch
 
 
 @pytest.fixture(scope="module")

@@ -1,7 +1,12 @@
 # Copyright (c) 2026 Mohamed Alkobrosli
 # SPDX-License-Identifier: MIT
 
-"""MNIST IDX download, parsing, and loading utilities."""
+"""MNIST download, parsing and fixed random projection (NumPy only).
+
+``load_projected_mnist`` normalises MNIST and maps it to ``N_COMPONENTS`` dimensions by a fixed
+random orthonormal projection that is never fitted to data. The class partition into
+experiences is *not* decided here; that belongs to ``polynomial_cl.continual``.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 
+N_COMPONENTS = 16
 BASE_URL = "https://storage.googleapis.com/cvdf-datasets/mnist/"
 FILES = {
     "train_images": "train-images-idx3-ubyte.gz",
@@ -110,4 +116,35 @@ def load_mnist(
         read_idx(paths["train_labels"], False),
         read_idx(paths["test_images"], True).astype(np.float32) / 255,
         read_idx(paths["test_labels"], False),
+    )
+
+
+def make_projection(seed: int, input_dim: int = 784, n_components: int = N_COMPONENTS):
+    """Deterministic orthonormal random projection matrix (input_dim, n_components)."""
+    if not 1 <= n_components <= input_dim:
+        raise ValueError("n_components must be between 1 and input_dim")
+    matrix = np.random.default_rng(seed).standard_normal((input_dim, n_components))
+    projection, _ = np.linalg.qr(matrix, mode="reduced")
+    return projection.astype(np.float32)
+
+
+def project_images(images: np.ndarray, projection: np.ndarray) -> np.ndarray:
+    """Apply the fixed MNIST normalisation, then the shared projection."""
+    normalized = (np.asarray(images, dtype=np.float32) - 0.1307) / 0.3081
+    if normalized.ndim != 2 or normalized.shape[1] != projection.shape[0]:
+        raise ValueError(
+            "images must be a 2D array matching projection input dimension"
+        )
+    return normalized @ projection
+
+
+def load_projected_mnist(root, projection_seed=0, download=True):
+    """Load MNIST from ``root`` and project it. Returns (train_x, train_y, test_x, test_y)."""
+    train_x, train_y, test_x, test_y = load_mnist(Path(root), download=download)
+    projection = make_projection(projection_seed)
+    return (
+        project_images(train_x, projection),
+        train_y,
+        project_images(test_x, projection),
+        test_y,
     )

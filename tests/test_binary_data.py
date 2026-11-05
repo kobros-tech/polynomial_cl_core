@@ -4,13 +4,8 @@
 import numpy as np
 import pytest
 
-from polynomial_cl.data import (
-    combine_splits,
-    generate_split,
-    make_experiences,
-    true_label,
-    true_score,
-)
+from polynomial_cl.binary.data import combine_splits, generate_split, make_experiences
+from polynomial_cl.data.synthetic import sinusoidal_target, true_label
 
 
 def test_reproducible_and_seed_dependent():
@@ -51,7 +46,7 @@ def test_experiences_have_different_distributions_and_balanced_classes():
 
 
 def test_boundary_is_nonlinear():
-    from polynomial_cl.data import boundary_curve
+    from polynomial_cl.data.synthetic import boundary_curve
 
     xs = np.linspace(-1, 1, 9)
     second_diff = np.diff(boundary_curve(xs), 2)
@@ -59,7 +54,8 @@ def test_boundary_is_nonlinear():
     # the sign of the score really is the label
     pts = np.array([[0.0, 0.1], [0.0, -0.1]])
     assert (
-        list(true_label(pts)) == [1, 0] and true_score(pts)[0] > 0 > true_score(pts)[1]
+        list(true_label(pts)) == [1, 0]
+        and sinusoidal_target(pts)[0] > 0 > sinusoidal_target(pts)[1]
     )
 
 
@@ -100,7 +96,7 @@ def test_generate_split_rejects_invalid_arguments(kwargs, error, message):
     ],
 )
 def test_experience_window_rejects_invalid_arguments(exp_id, n_experiences, error):
-    from polynomial_cl.data import experience_window
+    from polynomial_cl.binary.data import experience_window
 
     with pytest.raises(error):
         experience_window(exp_id, n_experiences)

@@ -11,7 +11,7 @@ test seeds, without re-selecting rates.
 
 ``--experiment per-degree``: for every (strategy, sampling) the rate vectors are selected on a
 validation split with ``--select-seeds`` and then run on the test set with ``--test-seeds``
-(disjoint). See polynomial_cl/class_incremental/degree_study.py for the protocol; this script
+(disjoint). See polynomial_cl/continual/degree_study.py for the protocol; this script
 only parses arguments and writes the result.
 """
 
@@ -19,9 +19,9 @@ import argparse
 import json
 from pathlib import Path
 
-from class_incremental import add_dataset_arguments, load_dataset
+from common import add_dataset_arguments, load_dataset
 
-from polynomial_cl.class_incremental import (
+from polynomial_cl.continual import (
     holdout_split,
     load_study_cells,
     make_feature_data,
@@ -29,14 +29,14 @@ from polynomial_cl.class_incremental import (
     run_per_degree_study,
     run_sampling_comparison,
 )
-from polynomial_cl.class_incremental.experiment import (
+from polynomial_cl.continual.experiment import (
     BATCH_SIZE,
     EPOCHS,
     MEMORY_PER_CLASS,
     N_REF_PER_CLASS,
     STRATEGIES,
 )
-from polynomial_cl.class_incremental.training import SAMPLING_POLICIES
+from polynomial_cl.continual.sampling import SAMPLING_POLICIES
 
 
 def main():

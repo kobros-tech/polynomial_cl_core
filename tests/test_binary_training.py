@@ -4,14 +4,14 @@
 import numpy as np
 import pytest
 
-from polynomial_cl.data import make_experiences
-from polynomial_cl.model import PolynomialLogisticModel, bce_with_logits, sigmoid
-from polynomial_cl.training import (
-    make_config,
-    preservation_null_basis,
-    run_continual,
-    train,
+from polynomial_cl.binary.data import make_experiences
+from polynomial_cl.binary.experiment import make_config, run_continual
+from polynomial_cl.models.binary import (
+    PolynomialLogisticModel,
+    bce_with_logits,
+    sigmoid,
 )
+from polynomial_cl.training.binary import preservation_null_basis, train
 
 
 def _linear_data(n=200, seed=0):
@@ -121,7 +121,7 @@ def setup():
 
 def test_null_basis_properties():
     ref = np.random.default_rng(0).uniform(-1, 1, (4, 2))
-    from polynomial_cl.features import polynomial_features
+    from polynomial_cl.models.binary import polynomial_features
 
     N = preservation_null_basis(3, ref)
     assert N.shape == (10, 6)

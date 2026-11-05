@@ -7,12 +7,8 @@ import struct
 import numpy as np
 import pytest
 
-from polynomial_cl.class_incremental import (
-    load_projected_mnist,
-    make_feature_data,
-    mnist,
-    run_comparison,
-)
+from polynomial_cl.continual import make_feature_data, run_comparison
+from polynomial_cl.data import load_projected_mnist, mnist
 
 
 def write_tiny_mnist(root, per_class=2):

@@ -3,37 +3,41 @@
 
 """Per-degree learning rates, class-balanced sampling, and the study protocol."""
 
+import inspect
+
 import numpy as np
 import pytest
 
-from polynomial_cl.class_incremental import (
+from polynomial_cl.continual import (
     STRATEGIES,
     candidate_vectors,
     make_feature_data,
-    make_synthetic_2d,
     make_task_plan,
+    run_comparison,
     run_condition,
     run_joint_reference,
     run_per_degree_study,
+    run_strategy_comparison,
 )
-from polynomial_cl.class_incremental.degree_rates import (
+from polynomial_cl.continual.degree_rates import (
     N_DEGREE_GROUPS,
     as_degree_rates,
     degree_of_feature,
     group_sizes,
     step_scale_for,
 )
-from polynomial_cl.class_incremental.degree_study import (
+from polynomial_cl.continual.degree_study import (
     combine_best_directions,
     mean_degree_diagnostic,
     vector_summary,
 )
-from polynomial_cl.class_incremental.features import (
+from polynomial_cl.continual.features import (
     MAX_DEGREE,
     n_polynomial_features,
 )
-from polynomial_cl.class_incremental.training import (
-    _balanced_batches,
+from polynomial_cl.continual.sampling import DEFAULT_SAMPLING, balanced_batches
+from polynomial_cl.data import make_synthetic_2d
+from polynomial_cl.training.multiclass import (
     fit_task,
     null_space_basis,
 )
@@ -284,7 +288,9 @@ def test_run_records_the_vector_and_applies_each_group_rate_after_expansion(tiny
 
 
 def test_different_rates_produce_independent_coefficient_changes(tiny_data):
-    run = _run(tiny_data, learning_rate=[0.2, 0.0, 0.2, 0.2])
+    # Shuffled batches: with balanced batches the first experience has an exactly zero
+    # constant-feature gradient at the zero initialisation, so its group may not move there.
+    run = _run(tiny_data, learning_rate=[0.2, 0.0, 0.2, 0.2], sampling="shuffled")
     change = run["degree_diagnostics"]["coef_change_l1"]
     assert all(row[1] == 0.0 for row in change)  # frozen linear group never moves
     assert all(row[0] > 0 for row in change)
@@ -348,7 +354,7 @@ def test_diagnostics_have_the_documented_shape_and_are_finite(tiny_data):
 def test_class_balanced_batches_have_equal_class_counts_and_repeat_small_pools():
     labels = np.repeat(np.arange(4), [3, 500, 500, 40])
     rng = np.random.default_rng(0)
-    batches = list(_balanced_batches(labels, 20, 32, rng))
+    batches = list(balanced_batches(labels, 20, 32, rng))
     assert len(batches) == 20 and all(len(b) == 32 for b in batches)
     for batch in batches:
         counts = np.bincount(labels[batch], minlength=4)
@@ -361,7 +367,7 @@ def test_class_balanced_batches_have_equal_class_counts_and_repeat_small_pools()
 
 def test_class_balanced_remainder_goes_to_distinct_classes():
     labels = np.repeat(np.arange(3), 50)
-    for batch in _balanced_batches(labels, 10, 10, np.random.default_rng(1)):
+    for batch in balanced_batches(labels, 10, 10, np.random.default_rng(1)):
         counts = np.bincount(labels[batch], minlength=3)
         assert sorted(counts) == [3, 3, 4]
 
@@ -413,8 +419,22 @@ def test_unknown_sampling_policy_is_rejected(tiny_data):
         _run(tiny_data, sampling="oversample")
 
 
-def test_shuffled_sampling_is_the_unchanged_default(tiny_data):
-    assert _run(tiny_data) == _run(tiny_data, sampling="shuffled")
+def test_class_balanced_is_the_default_and_shuffled_stays_available(tiny_data):
+    assert DEFAULT_SAMPLING == "class_balanced"
+    default = _run(tiny_data)
+    assert default == _run(tiny_data, sampling="class_balanced")
+    assert default["sampling"] == "class_balanced"
+    shuffled = _run(tiny_data, sampling="shuffled")
+    assert shuffled["sampling"] == "shuffled" and shuffled != default
+
+
+@pytest.mark.parametrize(
+    "function", [run_condition, run_comparison, run_strategy_comparison]
+)
+def test_no_experiment_function_hard_codes_a_sampling_policy(function):
+    assert (
+        inspect.signature(function).parameters["sampling"].default == DEFAULT_SAMPLING
+    )
 
 
 # -------------------------------------------- metrics and the study
@@ -439,7 +459,7 @@ def test_accuracy_and_forgetting_follow_from_the_matrix(tiny_data):
 
 
 def test_candidate_vectors_vary_one_group_at_a_time():
-    from polynomial_cl.class_incremental.degree_study import RATE_FACTORS
+    from polynomial_cl.continual.degree_study import RATE_FACTORS
 
     vectors = candidate_vectors(0.1)
     assert RATE_FACTORS == (0.25, 0.5, 2.0, 4.0)
@@ -504,7 +524,7 @@ def test_joint_reference_has_no_forgetting_and_is_reproducible(tiny_data):
 def test_cell_files_are_merged_and_inconsistent_seeds_rejected(tmp_path, tiny_data):
     import json
 
-    from polynomial_cl.class_incremental.degree_study import load_study_cells
+    from polynomial_cl.continual.degree_study import load_study_cells
 
     assert load_study_cells(tmp_path) is None
     for strategy in ("frozen_old", "ordinary"):
@@ -570,7 +590,7 @@ def _m(acc, forg, cur):
 
 
 def test_pareto_front_and_selection_consider_forgetting_not_only_accuracy():
-    from polynomial_cl.class_incremental.degree_study import (
+    from polynomial_cl.continual.degree_study import (
         choose_candidate,
         pareto_front,
         tradeoff_score,
@@ -697,7 +717,7 @@ def test_strategy_b_new_with_rate_vector_keeps_references_and_zero_group_frozen(
 
 
 def test_epoch_robustness_reuses_selected_vectors_without_reselecting(tiny_data):
-    from polynomial_cl.class_incremental import run_epoch_robustness
+    from polynomial_cl.continual import run_epoch_robustness
 
     study = run_per_degree_study(
         tiny_data, tiny_data, [0], [1, 2], strategies=("ordinary",), samplings=("shuffled",),
@@ -719,8 +739,8 @@ def test_epoch_robustness_reuses_selected_vectors_without_reselecting(tiny_data)
 def test_expansion_tolerance_scales_with_logit_size_but_still_rejects_nonzero_growth(
     tiny_data, monkeypatch
 ):
-    from polynomial_cl.class_incremental import experiment as experiment_module
-    from polynomial_cl.class_incremental.experiment import (
+    from polynomial_cl.continual import experiment as experiment_module
+    from polynomial_cl.continual.experiment import (
         EXPANSION_TOLERANCE,
         expansion_tolerance,
     )
@@ -784,3 +804,32 @@ def test_strategy_b_variants_report_both_null_space_dimensions(tiny_data):
     for other in ("ordinary", "frozen_old"):
         run = _run(tiny_data, other)
         assert all(v is None for v in run["null_dim_new_class_columns_by_task"])
+
+
+def test_degree_group_rows_show_a_zero_rate_group_as_untrainable_and_unchanged():
+    from polynomial_cl.continual import (
+        degree_group_rows,
+        make_feature_data,
+        make_task_plan,
+        run_condition,
+    )
+    from polynomial_cl.data import make_synthetic_2d
+
+    data = make_feature_data(
+        *make_synthetic_2d(0, n_train_per_class=30, n_test_per_class=10)[:4]
+    )
+    run = run_condition(
+        "expanding", data, *make_task_plan(data.train_y, 0, 10), seed=0, epochs=1,
+        learning_rate=[0.1, 0.1, 0.0, 0.1],
+    )  # fmt: skip
+    rows = degree_group_rows(run)
+    zero = [r for r in rows if r["degree"] == 2]
+    assert zero and all(r["rate"] == 0.0 and r["trainable"] == 0 for r in zero)
+    assert all(
+        r["coef_change_l1"] == 0.0 for r in zero
+    )  # exactly frozen, not just small
+    moving = [r for r in rows if r["degree"] == 1]
+    assert all(
+        r["trainable"] == r["coefficients"] and r["coef_change_l1"] > 0 for r in moving
+    )
+    assert {r["experience"] for r in rows} == {1, 2, 3, 4, 5}

@@ -162,3 +162,41 @@ def test_per_degree_script_runs_study_then_epoch_robustness(tmp_path):
             "--test-seeds", 1, "--output", tmp_path / "bad.json",
         )  # fmt: skip
     assert "overlap" in error.value.stderr and not (tmp_path / "bad.json").exists()
+
+
+def test_joint_training_script_binary_target_is_selectable_and_writes_scalars(tmp_path):
+    results = {}
+    for target in ("sinusoidal", "circular"):
+        out = tmp_path / f"{target}.json"
+        run_script(
+            "joint_training.py", "--target", target, "--binary-degrees", 1, 2,
+            "--binary-epochs", 60, "--n-train", 30, "--n-test", 30, "--output", out,
+        )  # fmt: skip
+        results[target] = json.loads(out.read_text())
+    rows = results["circular"]["rows"]
+    assert [(r["degree"], r["epochs"]) for r in rows] == [(1, 60), (2, 60)]
+    assert all("loss_history" not in r and "mean_forgetting" not in r for r in rows)
+    assert results["circular"]["protocol"]["target"] == "circular"
+    assert (
+        rows != results["sinusoidal"]["rows"]
+    )  # the target really changes the problem
+
+
+def test_joint_training_script_ten_class_reference(tmp_path):
+    out = tmp_path / "joint.json"
+    run_script(
+        "joint_training.py", "--experiment", "ten_class", "--dataset", "synthetic_2d",
+        "--degrees", 1, "--epochs", 1, "--seeds", 0, 1, "--train-per-class", 6,
+        "--test-per-class", 4, "--output", out,
+    )  # fmt: skip
+    row = json.loads(out.read_text())["rows"][0]
+    assert row["seeds"] == [0, 1] and len(row["per_class_accuracy_mean"]) == 10
+    assert "forgetting" not in json.dumps(row)
+
+
+def test_joint_training_ten_class_requires_a_dataset():
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "experiments" / "joint_training.py"), "--experiment", "ten_class"],
+        capture_output=True, text=True, check=False,
+    )  # fmt: skip
+    assert proc.returncode != 0 and "--dataset" in proc.stderr
