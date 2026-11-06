@@ -75,10 +75,16 @@ def test_numpy_integer_degree_is_accepted():
 def test_binary_exponents_are_the_two_variable_case_of_the_shared_enumeration():
     assert feature_exponents(3) == [
         (0, 0),
-        (1, 0), (0, 1),
-        (2, 0), (1, 1), (0, 2),
-        (3, 0), (2, 1), (1, 2), (0, 3),
-    ]  # fmt: skip
+        (1, 0),
+        (0, 1),
+        (2, 0),
+        (1, 1),
+        (0, 2),
+        (3, 0),
+        (2, 1),
+        (1, 2),
+        (0, 3),
+    ]
     for degree in range(11):
         shared = monomial_exponents(2, degree)
         assert feature_exponents(degree) == [tuple(map(int, row)) for row in shared]

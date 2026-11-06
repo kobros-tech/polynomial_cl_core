@@ -15,6 +15,24 @@ dev = ["pytest", "jupyter", "nbformat", "nbconvert", "ipykernel"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+src = ["src", "."]
+extend-exclude = ["notebooks", "results", "data"]
+
+[tool.ruff.lint]
+# Pyflakes, pycodestyle, isort, flake8-bugbear, pyupgrade and flake8-comprehensions.
+select = ["E", "F", "W", "I", "B", "UP", "C4"]
+# Long comment and docstring lines are left to the author; ruff-format wraps code.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["polynomial_cl", "experiments"]
+
+[tool.ruff.format]
+docstring-code-format = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

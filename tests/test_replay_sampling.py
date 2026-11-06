@@ -54,9 +54,17 @@ def _fit_with(sampler):
         np.repeat([0, 1, 2], [40, 15, 5]),
     )
     return fit_task(
-        np.zeros((4, 3), np.float32), x, y, x[:0], y[:0], epochs=2, learning_rate=0.1,
-        batch_size=16, seed=3, epoch_sampler=sampler,
-    )  # fmt: skip
+        np.zeros((4, 3), np.float32),
+        x,
+        y,
+        x[:0],
+        y[:0],
+        epochs=2,
+        learning_rate=0.1,
+        batch_size=16,
+        seed=3,
+        epoch_sampler=sampler,
+    )
 
 
 def test_the_trainer_uses_the_injected_sampler_and_the_default_matches_shuffled():

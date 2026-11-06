@@ -26,13 +26,20 @@ def test_class_incremental_plots_run_and_do_not_change_the_runs():
     runs = {
         policy: [
             run_condition(
-                "expanding", data, tasks, memory, seed=s, epochs=1, batch_size=8,
-                learning_rate=[0.1, 0.2, 0.05, 0.1], sampling=policy,
+                "expanding",
+                data,
+                tasks,
+                memory,
+                seed=s,
+                epochs=1,
+                batch_size=8,
+                learning_rate=[0.1, 0.2, 0.05, 0.1],
+                sampling=policy,
             )
             for s in (0, 1)
         ]
         for policy in ("shuffled", "class_balanced")
-    }  # fmt: skip
+    }
     snapshot = copy.deepcopy(runs)
     P.plot_cil_accuracy_over_experiences(runs)
     P.plot_cil_forgetting(runs)
@@ -45,7 +52,7 @@ def test_class_incremental_plots_run_and_do_not_change_the_runs():
         P.plot_degree_diagnostic(runs["shuffled"], key)
     vectors = {"shared": [0.1] * 4, "d1x4": [0.1, 0.4, 0.1, 0.1]}
     P.plot_rate_vectors_with_results(
-        vectors, {n: runs["shuffled"] for n in vectors}, "shared"
+        vectors, dict.fromkeys(vectors, runs["shuffled"]), "shared"
     )
     P.plot_sampling_counts(
         {k: [r["sampling_by_task"][0] for r in v][:1] for k, v in runs.items()}

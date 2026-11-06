@@ -36,10 +36,13 @@ def _digest(**kwargs):
     [
         ({}, "994748f7fe36c4f5"),
         ({"seed": 3, "n_train": 50, "n_test": 60}, "f81e2412bcf3385e"),
-        ({"seed": 1, "n_train": 80, "n_test": 40, "noise": 0.2, "test_noise": 0.1}, "c094eae16a8430ff"),
+        (
+            {"seed": 1, "n_train": 80, "n_test": 40, "noise": 0.2, "test_noise": 0.1},
+            "c094eae16a8430ff",
+        ),
         ({"n_experiences": 5, "seed": 7}, "d3b29edf26e5313a"),
     ],
-)  # fmt: skip
+)
 def test_sinusoidal_experiences_are_bit_identical_to_the_pre_refactor_generator(
     kwargs, expected
 ):

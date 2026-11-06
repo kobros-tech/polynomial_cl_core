@@ -87,9 +87,14 @@ def generate_split(
 
 
 def make_experiences(
-    n_experiences=10, n_train=200, n_test=500, seed=0, noise=0.0, test_noise=0.0,
+    n_experiences=10,
+    n_train=200,
+    n_test=500,
+    seed=0,
+    noise=0.0,
+    test_noise=0.0,
     target_function=sinusoidal_target,
-):  # fmt: skip
+):
     """Build all experiences. The test split depends only on (seed, exp, n_test, test_noise)."""
     return [
         Experience(

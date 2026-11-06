@@ -95,9 +95,16 @@ def test_study_rows_and_pairs_cover_shared_and_selected_vectors(data):
     from polynomial_cl.continual.degree_study import study_pairs, study_rows
 
     study = run_per_degree_study(
-        data, data, [0], [1], strategies=("ordinary",), samplings=("shuffled",),
-        epochs=1, batch_size=64, memory_per_class=10,
-    )  # fmt: skip
+        data,
+        data,
+        [0],
+        [1],
+        strategies=("ordinary",),
+        samplings=("shuffled",),
+        epochs=1,
+        batch_size=64,
+        memory_per_class=10,
+    )
     rows = study_rows(study)
     cell = study["cells"][0]
     assert rows[0]["vector"].rstrip("*^") == "shared"

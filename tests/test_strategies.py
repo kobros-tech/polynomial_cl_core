@@ -34,8 +34,13 @@ def setting():
 
 def test_the_six_strategies_are_exposed_in_order():
     assert STRATEGIES == (
-        "ordinary", "ordinary_no_replay", "small_old_lr", "frozen_old", "strategy_b", "strategy_b_new",
-    )  # fmt: skip
+        "ordinary",
+        "ordinary_no_replay",
+        "small_old_lr",
+        "frozen_old",
+        "strategy_b",
+        "strategy_b_new",
+    )
 
 
 @pytest.mark.parametrize("strategy", ["ordinary", "ordinary_no_replay"])

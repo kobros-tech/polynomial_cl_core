@@ -61,9 +61,14 @@ def _truth_line(ax, target=None, **kw):
     else:
         xx, yy, pts = make_grid(400)
         ax.contour(
-            xx, yy, np.asarray(target(pts)).reshape(xx.shape), levels=[0],
-            colors=style["color"], linewidths=style["lw"], linestyles=style["ls"],
-        )  # fmt: skip
+            xx,
+            yy,
+            np.asarray(target(pts)).reshape(xx.shape),
+            levels=[0],
+            colors=style["color"],
+            linewidths=style["lw"],
+            linestyles=style["ls"],
+        )
 
 
 def plot_samples(ax, x, y, correct=None, s=14, alpha=0.9):
@@ -466,9 +471,11 @@ def plot_accuracy_vs_degree(rows, ax=None, title="Joint-training accuracy by deg
             (r for r in rows if r["epochs"] == epochs), key=lambda r: r["degree"]
         )
         ax.plot(
-            [r["degree"] for r in chosen], [r["mean_accuracy"] for r in chosen],
-            marker="o", label=f"{epochs} epochs",
-        )  # fmt: skip
+            [r["degree"] for r in chosen],
+            [r["mean_accuracy"] for r in chosen],
+            marker="o",
+            label=f"{epochs} epochs",
+        )
     ax.set_xlabel("polynomial degree")
     ax.set_ylabel("mean evaluation accuracy")
     ax.set_ylim(0.4, 1.02)
@@ -489,9 +496,11 @@ def plot_accuracy_vs_budget(
             (r for r in rows if r["degree"] == degree), key=lambda r: r["epochs"]
         )
         ax.plot(
-            [r["epochs"] for r in chosen], [r["mean_accuracy"] for r in chosen],
-            marker="o", label=f"degree {degree}",
-        )  # fmt: skip
+            [r["epochs"] for r in chosen],
+            [r["mean_accuracy"] for r in chosen],
+            marker="o",
+            label=f"degree {degree}",
+        )
     ax.set_xscale("log")
     ax.set_xlabel("epochs (full-batch gradient steps)")
     ax.set_ylabel("mean evaluation accuracy")

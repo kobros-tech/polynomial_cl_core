@@ -124,9 +124,18 @@ def _fit(weights, x, y, eligible, replay=None, epochs=2, **restrictions):
         else (np.empty((0, x.shape[1]), np.float32), np.empty(0, np.int64))
     )
     return fit_task(
-        weights, x, y, rx, ry, epochs=epochs, learning_rate=0.1, batch_size=3, seed=5,
-        eligible_classes=np.array(eligible), **restrictions,
-    )  # fmt: skip
+        weights,
+        x,
+        y,
+        rx,
+        ry,
+        epochs=epochs,
+        learning_rate=0.1,
+        batch_size=3,
+        seed=5,
+        eligible_classes=np.array(eligible),
+        **restrictions,
+    )
 
 
 def test_training_never_updates_future_class_weights():
@@ -204,10 +213,18 @@ def tiny_data():
 def _run_all(data, seed=2):
     tasks, memory = make_task_plan(data.train_y, seed, memory_per_class=2)
     return {
-        c: run_condition(c, data, tasks, memory, seed=seed, epochs=1, learning_rate=0.05,
-                         batch_size=8)
+        c: run_condition(
+            c,
+            data,
+            tasks,
+            memory,
+            seed=seed,
+            epochs=1,
+            learning_rate=0.05,
+            batch_size=8,
+        )
         for c in CONDITIONS
-    }  # fmt: skip
+    }
 
 
 def test_conditions_differ_only_in_degree_schedule(tiny_data):
@@ -285,9 +302,18 @@ def test_comparison_is_deterministic_and_summarises_over_seeds(tiny_data):
 
 def test_summary_uses_sample_std_and_zero_for_a_single_seed():
     rows = [
-        {"condition": c, "final_mean_accuracy": a, "final_current_accuracy": a, "mean_forgetting": f}
-        for c, a, f in (("expanding", 0.7, 0.1), ("expanding", 0.9, 0.3), ("fixed_linear", 0.5, 0.2))
-    ]  # fmt: skip
+        {
+            "condition": c,
+            "final_mean_accuracy": a,
+            "final_current_accuracy": a,
+            "mean_forgetting": f,
+        }
+        for c, a, f in (
+            ("expanding", 0.7, 0.1),
+            ("expanding", 0.9, 0.3),
+            ("fixed_linear", 0.5, 0.2),
+        )
+    ]
     summary = summarize_runs(rows)
     assert summary["expanding"]["final_mean_accuracy"]["mean"] == pytest.approx(0.8)
     assert summary["expanding"]["final_mean_accuracy"]["std"] == pytest.approx(
@@ -332,7 +358,10 @@ def test_frozen_and_slowed_coefficients_follow_update_scale():
     scale[:2, :2] = 0.1
     slowed = _fit(start.copy(), x, y, [0, 1], update_scale=scale)
     free = _fit(start.copy(), x, y, [0, 1])
-    moved = lambda w: np.abs(w[:2, :2] - start[:2, :2]).sum()
+
+    def moved(w):
+        return np.abs(w[:2, :2] - start[:2, :2]).sum()
+
     assert 0 < moved(slowed) < moved(free)
 
 
@@ -357,10 +386,20 @@ def test_update_restrictions_validate_their_shapes():
 def _strategy_runs(data, **kwargs):
     tasks, memory = make_task_plan(data.train_y, 2, 2)
     return {
-        s: run_condition("expanding", data, tasks, memory, seed=2, epochs=1, learning_rate=0.05,
-                         batch_size=8, strategy=s, **kwargs)
+        s: run_condition(
+            "expanding",
+            data,
+            tasks,
+            memory,
+            seed=2,
+            epochs=1,
+            learning_rate=0.05,
+            batch_size=8,
+            strategy=s,
+            **kwargs,
+        )
         for s in STRATEGIES
-    }  # fmt: skip
+    }
 
 
 def test_default_strategy_is_ordinary_and_unknown_strategies_are_rejected(tiny_data):
@@ -549,9 +588,15 @@ def test_feature_power_runs_for_every_strategy_and_zero_is_the_default(tiny_data
     )
     for strategy in STRATEGIES:
         run = run_condition(
-            "expanding", tiny_data, tasks, memory, strategy=strategy, feature_power=1.0,
-            n_ref_per_class=1, **kwargs,
-        )  # fmt: skip
+            "expanding",
+            tiny_data,
+            tasks,
+            memory,
+            strategy=strategy,
+            feature_power=1.0,
+            n_ref_per_class=1,
+            **kwargs,
+        )
         assert run["accuracy_matrix"] != default["accuracy_matrix"] or strategy in (
             "strategy_b",
             "strategy_b_new",
