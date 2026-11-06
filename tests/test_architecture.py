@@ -119,8 +119,11 @@ def test_every_module_imports_in_a_fresh_interpreter_order():
     for module in sorted(_modules()):
         done = subprocess.run(
             [sys.executable, "-c", f"import {module}"],
-            capture_output=True, text=True, check=False, cwd=ROOT,
-        )  # fmt: skip
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=ROOT,
+        )
         assert done.returncode == 0, f"{module}: {done.stderr[-300:]}"
 
 
@@ -151,7 +154,7 @@ def _sources():
 
 
 def test_no_stale_package_imports_anywhere():
-    for where, tree in _sources():
+    for _where, tree in _sources():
         for module, names in _imported_names(tree):
             imported = importlib.import_module(module)
             for name in names:

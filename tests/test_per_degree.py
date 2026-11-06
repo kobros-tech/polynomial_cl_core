@@ -144,9 +144,19 @@ def _toy():
 def _one_step(x, y, group_scale, base, **kwargs):
     weights = np.zeros((10, 10), np.float32)
     fit_task(
-        weights, x, y, EMPTY_X, EMPTY_Y, epochs=1, learning_rate=base, batch_size=len(y),
-        seed=0, eligible_classes=np.arange(2), group_scale=group_scale, **kwargs,
-    )  # fmt: skip
+        weights,
+        x,
+        y,
+        EMPTY_X,
+        EMPTY_Y,
+        epochs=1,
+        learning_rate=base,
+        batch_size=len(y),
+        seed=0,
+        eligible_classes=np.arange(2),
+        group_scale=group_scale,
+        **kwargs,
+    )
     return weights[:, :2]
 
 
@@ -185,9 +195,18 @@ def test_zero_rate_freezes_a_group_exactly_over_many_updates():
     base, scale = step_scale_for(np.array([0.5, 0.0, 0.5, 0.0]), index)
     weights = np.zeros((10, 10), np.float32)
     fit_task(
-        weights, x, y, EMPTY_X, EMPTY_Y, epochs=5, learning_rate=base, batch_size=7,
-        seed=1, eligible_classes=np.arange(2), group_scale=scale,
-    )  # fmt: skip
+        weights,
+        x,
+        y,
+        EMPTY_X,
+        EMPTY_Y,
+        epochs=5,
+        learning_rate=base,
+        batch_size=7,
+        seed=1,
+        eligible_classes=np.arange(2),
+        group_scale=scale,
+    )
     for frozen in (1, 3):
         assert not weights[index == frozen].any()
     assert weights[index == 0].any() and weights[index == 2].any()
@@ -196,7 +215,10 @@ def test_zero_rate_freezes_a_group_exactly_over_many_updates():
 def test_group_scale_is_validated():
     x, y = _toy()
     kwargs = {"epochs": 1, "learning_rate": 0.1, "batch_size": 8, "seed": 0}
-    w = lambda: np.zeros((10, 10), np.float32)
+
+    def w():
+        return np.zeros((10, 10), np.float32)
+
     for bad in (np.ones(9), -np.ones(10), np.full(10, np.nan), np.zeros(10)):
         with pytest.raises(ValueError, match="group_scale"):
             fit_task(w(), x, y, EMPTY_X, EMPTY_Y, group_scale=bad, **kwargs)
@@ -234,9 +256,19 @@ def test_update_masks_and_group_scale_compose():
     mask[3:6, :2] = 0.1  # small_old_lr-like
     out = start.copy()
     fit_task(
-        out, x, y, EMPTY_X, EMPTY_Y, epochs=3, learning_rate=base, batch_size=8, seed=0,
-        eligible_classes=np.arange(2), update_scale=mask, group_scale=scale,
-    )  # fmt: skip
+        out,
+        x,
+        y,
+        EMPTY_X,
+        EMPTY_Y,
+        epochs=3,
+        learning_rate=base,
+        batch_size=8,
+        seed=0,
+        eligible_classes=np.arange(2),
+        update_scale=mask,
+        group_scale=scale,
+    )
     np.testing.assert_array_equal(
         out[:3, :2], start[:3, :2]
     )  # frozen stays bit-identical
@@ -252,9 +284,19 @@ def test_null_projection_keeps_reference_logits_with_group_rates_including_zero(
     start = np.random.default_rng(4).normal(size=(10, 10)).astype(np.float32)
     out = start.copy()
     fit_task(
-        out, x, y, EMPTY_X, EMPTY_Y, epochs=5, learning_rate=base, batch_size=8, seed=0,
-        eligible_classes=np.arange(2), null_basis=basis, group_scale=scale,
-    )  # fmt: skip
+        out,
+        x,
+        y,
+        EMPTY_X,
+        EMPTY_Y,
+        epochs=5,
+        learning_rate=base,
+        batch_size=8,
+        seed=0,
+        eligible_classes=np.arange(2),
+        null_basis=basis,
+        group_scale=scale,
+    )
     np.testing.assert_allclose(refs @ out[:, :2], refs @ start[:, :2], atol=1e-4)
     assert np.abs(x[3:] @ out[:, :2] - x[3:] @ start[:, :2]).max() > 1e-3
     np.testing.assert_array_equal(
@@ -492,10 +534,17 @@ def test_study_rejects_overlapping_seeds_and_runs_end_to_end(tiny_data):
     with pytest.raises(ValueError, match="overlap"):
         run_per_degree_study(tiny_data, tiny_data, [0, 1], [1, 2])
     study = run_per_degree_study(
-        tiny_data, tiny_data, [0], [1, 2],
-        strategies=("ordinary",), samplings=("shuffled", "class_balanced"),
-        epochs=1, batch_size=16, memory_per_class=4, n_ref_per_class=1,
-    )  # fmt: skip
+        tiny_data,
+        tiny_data,
+        [0],
+        [1, 2],
+        strategies=("ordinary",),
+        samplings=("shuffled", "class_balanced"),
+        epochs=1,
+        batch_size=16,
+        memory_per_class=4,
+        n_ref_per_class=1,
+    )
     assert len(study["cells"]) == 2
     for cell in study["cells"]:
         assert cell["selected"] in cell["validation_scores"]
@@ -529,9 +578,17 @@ def test_cell_files_are_merged_and_inconsistent_seeds_rejected(tmp_path, tiny_da
     assert load_study_cells(tmp_path) is None
     for strategy in ("frozen_old", "ordinary"):
         study = run_per_degree_study(
-            tiny_data, tiny_data, [0], [1], strategies=(strategy,), samplings=("shuffled",),
-            epochs=1, batch_size=16, memory_per_class=4, n_ref_per_class=1,
-        )  # fmt: skip
+            tiny_data,
+            tiny_data,
+            [0],
+            [1],
+            strategies=(strategy,),
+            samplings=("shuffled",),
+            epochs=1,
+            batch_size=16,
+            memory_per_class=4,
+            n_ref_per_class=1,
+        )
         (tmp_path / f"cell_{strategy}.json").write_text(json.dumps(study))
     merged = load_study_cells(tmp_path)
     assert [c["strategy"] for c in merged["cells"]] == ["ordinary", "frozen_old"]
@@ -621,10 +678,18 @@ def test_pareto_front_and_selection_consider_forgetting_not_only_accuracy():
 
 def test_study_cells_report_validation_metrics_and_the_pareto_front(tiny_data):
     study = run_per_degree_study(
-        tiny_data, tiny_data, [0], [1], strategies=("ordinary",), samplings=("shuffled",),
-        epochs=1, batch_size=16, memory_per_class=4, n_ref_per_class=1,
+        tiny_data,
+        tiny_data,
+        [0],
+        [1],
+        strategies=("ordinary",),
+        samplings=("shuffled",),
+        epochs=1,
+        batch_size=16,
+        memory_per_class=4,
+        n_ref_per_class=1,
         min_current_accuracy=0.0,
-    )  # fmt: skip
+    )
     cell = study["cells"][0]
     assert set(cell["validation_metrics"]) == set(cell["vectors"])
     assert (
@@ -667,9 +732,19 @@ def test_strategy_b_new_updates_match_the_documented_subspaces():
     start = rng.normal(size=(count, 10)).astype(np.float32)
     out = start.copy()
     fit_task(
-        out, x, y, EMPTY_X, EMPTY_Y, epochs=4, learning_rate=0.1, batch_size=8, seed=0,
-        eligible_classes=np.arange(n_seen), update_scale=mask, null_groups=groups,
-    )  # fmt: skip
+        out,
+        x,
+        y,
+        EMPTY_X,
+        EMPTY_Y,
+        epochs=4,
+        learning_rate=0.1,
+        batch_size=8,
+        seed=0,
+        eligible_classes=np.arange(n_seen),
+        update_scale=mask,
+        null_groups=groups,
+    )
     moved = out - start
     assert not moved[:old_rows, :old_classes].any()  # old coefficients bit-identical
     assert np.abs(moved[:, old_classes:n_seen]).max() > 1e-3  # new classes do learn
@@ -720,9 +795,17 @@ def test_epoch_robustness_reuses_selected_vectors_without_reselecting(tiny_data)
     from polynomial_cl.continual import run_epoch_robustness
 
     study = run_per_degree_study(
-        tiny_data, tiny_data, [0], [1, 2], strategies=("ordinary",), samplings=("shuffled",),
-        epochs=1, batch_size=16, memory_per_class=4, n_ref_per_class=1,
-    )  # fmt: skip
+        tiny_data,
+        tiny_data,
+        [0],
+        [1, 2],
+        strategies=("ordinary",),
+        samplings=("shuffled",),
+        epochs=1,
+        batch_size=16,
+        memory_per_class=4,
+        n_ref_per_class=1,
+    )
     longer = run_epoch_robustness(
         tiny_data, study, 2, batch_size=16, memory_per_class=4, n_ref_per_class=1
     )
@@ -767,9 +850,18 @@ def test_expansion_tolerance_scales_with_logit_size_but_still_rejects_nonzero_gr
 def test_progress_log_reports_stages_and_every_run(tiny_data):
     lines = []
     run_per_degree_study(
-        tiny_data, tiny_data, [0], [1], strategies=("ordinary",), samplings=("shuffled",),
-        epochs=1, batch_size=16, memory_per_class=4, n_ref_per_class=1, log=lines.append,
-    )  # fmt: skip
+        tiny_data,
+        tiny_data,
+        [0],
+        [1],
+        strategies=("ordinary",),
+        samplings=("shuffled",),
+        epochs=1,
+        batch_size=16,
+        memory_per_class=4,
+        n_ref_per_class=1,
+        log=lines.append,
+    )
     text = "\n".join(lines)
     for expected in (
         "stage 1",
@@ -819,9 +911,13 @@ def test_degree_group_rows_show_a_zero_rate_group_as_untrainable_and_unchanged()
         *make_synthetic_2d(0, n_train_per_class=30, n_test_per_class=10)[:4]
     )
     run = run_condition(
-        "expanding", data, *make_task_plan(data.train_y, 0, 10), seed=0, epochs=1,
+        "expanding",
+        data,
+        *make_task_plan(data.train_y, 0, 10),
+        seed=0,
+        epochs=1,
         learning_rate=[0.1, 0.1, 0.0, 0.1],
-    )  # fmt: skip
+    )
     rows = degree_group_rows(run)
     zero = [r for r in rows if r["degree"] == 2]
     assert zero and all(r["rate"] == 0.0 and r["trainable"] == 0 for r in zero)

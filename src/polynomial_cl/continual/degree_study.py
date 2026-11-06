@@ -142,9 +142,10 @@ def choose_candidate(metrics_by_name, min_current_accuracy=None):
     names = list(metrics_by_name)
     if min_current_accuracy is not None:
         passing = [
-            n for n in names
+            n
+            for n in names
             if metrics_by_name[n]["final_current_accuracy"] >= min_current_accuracy
-        ]  # fmt: skip
+        ]
         names = passing or names
     front = pareto_front({n: metrics_by_name[n] for n in names})
     return max(front, key=lambda n: tradeoff_score(metrics_by_name[n]))

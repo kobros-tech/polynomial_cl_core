@@ -68,9 +68,11 @@ def main():
     p.add_argument("--select-seeds", nargs="+", type=int, default=[0, 1, 2])
     p.add_argument("--test-seeds", nargs="+", type=int, default=[3, 4, 5, 6, 7, 8, 9])
     p.add_argument(
-        "--min-current-accuracy", type=float, default=None,
+        "--min-current-accuracy",
+        type=float,
+        default=None,
         help="per-degree: validation floor on newest-experience accuracy for selection",
-    )  # fmt: skip
+    )
     p.add_argument("--cells-dir", type=Path, default=Path("results/per_degree"))
     p.add_argument("--validation-fraction", type=float, default=0.1)
     p.add_argument("--epochs", type=int, default=EPOCHS)

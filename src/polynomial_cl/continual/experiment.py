@@ -182,9 +182,21 @@ def _mean_after_first(values):
 
 
 def _record_indicators(
-    out, weights, before, data, count, task, old_test, refs, scale, null_basis,
-    loss_before, loss_after, step_scale=None, null_groups=None,
-):  # fmt: skip
+    out,
+    weights,
+    before,
+    data,
+    count,
+    task,
+    old_test,
+    refs,
+    scale,
+    null_basis,
+    loss_before,
+    loss_after,
+    step_scale=None,
+    null_groups=None,
+):
     n_seen, old_classes = 2 * (task + 1), 2 * task
     used = (slice(None, count), slice(None, n_seen))
     out["train_loss_by_task"].append([loss_before, loss_after])
@@ -452,9 +464,17 @@ def run_condition(
             sizes = np.maximum(np.bincount(group_index, minlength=N_DEGREE_GROUPS), 1)
             effective = effective * sums / sizes
         diag = _degree_diagnostics(
-            weights, before, data, count, task, group_index, n_active,
-            effective, scale, fit_stats,
-        )  # fmt: skip
+            weights,
+            before,
+            data,
+            count,
+            task,
+            group_index,
+            n_active,
+            effective,
+            scale,
+            fit_stats,
+        )
         for key in DEGREE_DIAGNOSTICS:
             degree_diag[key].append(diag[key])
         sampling_log.append(
@@ -472,10 +492,21 @@ def run_condition(
             }
         )
         _record_indicators(
-            indicators, weights, before, data, count, task, old_test, refs, scale, null_basis,
-            loss_before, cross_entropy(weights, train_x, train_y, n_seen),
-            step_scale=step_scale, null_groups=null_groups,
-        )  # fmt: skip
+            indicators,
+            weights,
+            before,
+            data,
+            count,
+            task,
+            old_test,
+            refs,
+            scale,
+            null_basis,
+            loss_before,
+            cross_entropy(weights, train_x, train_y, n_seen),
+            step_scale=step_scale,
+            null_groups=null_groups,
+        )
         matrix[task, : task + 1] = accuracy_by_task(
             weights,
             data.test_x[:, :count],
@@ -602,12 +633,20 @@ def run_strategy_comparison(
         for strategy in strategies:
             runs.append(
                 run_condition(
-                    "expanding", data, tasks, memory, seed=seed, epochs=epochs,
-                    learning_rate=learning_rate, batch_size=batch_size,
-                    strategy=strategy, n_ref_per_class=n_ref_per_class, feature_power=feature_power,
+                    "expanding",
+                    data,
+                    tasks,
+                    memory,
+                    seed=seed,
+                    epochs=epochs,
+                    learning_rate=learning_rate,
+                    batch_size=batch_size,
+                    strategy=strategy,
+                    n_ref_per_class=n_ref_per_class,
+                    feature_power=feature_power,
                     sampling=sampling,
                 )
-            )  # fmt: skip
+            )
     return {
         "runs": runs,
         "summary": mean_std_by_condition(runs, STRATEGY_METRICS, key="strategy"),

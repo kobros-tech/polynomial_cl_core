@@ -86,9 +86,13 @@ def test_seed_summary_rows_step_rows_and_sequential_curves():
 
     data = {"n_train": 40, "n_test": 40, "n_experiences": 4}
     runs = {
-        name: run_seeds([0, 1], make_config(name, epochs=20, m_current=20, m_replay=20, capacity=30), data)
+        name: run_seeds(
+            [0, 1],
+            make_config(name, epochs=20, m_current=20, m_replay=20, capacity=30),
+            data,
+        )
         for name in ("ordinary", "strategy_b_new")
-    }  # fmt: skip
+    }
     rows = seed_summary_rows(runs, key="strategy")
     assert [r["strategy"] for r in rows] == ["ordinary", "strategy_b_new"]
     assert rows[0]["null_dim_last"] == "n/a" and rows[1]["null_dim_last"] != "n/a"
