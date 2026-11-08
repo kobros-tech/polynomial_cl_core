@@ -50,6 +50,7 @@ from .experiment import (
     STRATEGIES,
     STRATEGY_METRICS,
     make_task_plan,
+    require_diagnostics,
     run_condition,
 )
 
@@ -408,6 +409,8 @@ def vector_summary(runs, metrics=TRADEOFF_METRICS):
 
 def mean_degree_diagnostic(runs, key):
     """(n_experiences, n_degree_groups) mean over runs of a degree diagnostic (NaN if absent)."""
+    for r in runs:
+        require_diagnostics(r, "mean_degree_diagnostic")
     stacked = np.array(
         [
             [
@@ -513,6 +516,7 @@ def degree_group_rows(run):
     ``trainable`` counts the coefficients that can move; a group whose rate is zero has none,
     and its measured ``coef_change_l1`` is exactly 0.
     """
+    require_diagnostics(run, "degree_group_rows")
     d = run["degree_diagnostics"]
     rows = []
     for task, groups in enumerate(d["lr"]):

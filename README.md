@@ -90,6 +90,32 @@ python experiments/class_incremental.py --dataset split_mnist  --output results/
 python experiments/class_incremental.py --dataset split_mnist --sampling shuffled --output results/split_mnist_shuffled.json   # the earlier (shuffled) protocol
 ```
 
+### Cost of a run: lean mode and timings
+
+A class-incremental run does two kinds of work. The _learning_ work is the task plan, replay, mini-batch updates and the accuracy matrix after every experience. The _observing_ work only measures what happened: the two full training-set loss passes per experience, the per-degree-group statistics (`degree_diagnostics`), the old-class logit, flip and takeover indicators, and the null-space rank bookkeeping. On Split MNIST the observing work is roughly half of a run's time, so benchmark code that only needs accuracy and forgetting can switch it off:
+
+```python
+run = run_condition("expanding", data, tasks, memory, seed=0, diagnostics=False)  # lean
+run = run_comparison(data, seeds, diagnostics=False)  # same for all three conditions
+```
+
+```bash
+python experiments/class_incremental.py --dataset split_mnist --no-diagnostics --output results/lean.json   # --experiment conditions only
+```
+
+`diagnostics=False` skips only observation. The task plan, replay, sampling, update rule, number of updates and evaluation are untouched, so the accuracy matrix, per-class matrix, forgetting and `sampling_by_task` are bit-for-bit those of a default (`diagnostics=True`) run; `tests/test_lean_mode.py` checks this for every condition and update rule. The record keeps its schema and carries `"diagnostics": false`; every observing field (`train_loss_by_task`, `l1_update_by_task`, `degree_diagnostics`, `old_*_by_task`, `mean_old_*`, `mean_loss_reduction`, ...) is `None`. Helpers that need those fields (`old_class_rows`, `strategy_diagnostic_rows`, `degree_group_rows`, `plot_cil_takeover_flips`) raise a clear `ValueError` for a lean run, and `run_strategy_comparison` and the per-degree studies always run in full because they are diagnostics studies. The default stays `diagnostics=True`.
+
+To see where time goes, pass a dict as `timings`; it is filled in place (the record itself stays deterministic):
+
+```python
+timings = {}
+run_condition("expanding", data, tasks, memory, seed=0, timings=timings)
+# {'training_seconds': ..., 'evaluation_seconds': ..., 'diagnostics_seconds': ...,
+#  'other_seconds': ..., 'total_seconds': ...}
+```
+
+The polynomial design matrix (969 columns for 16 variables at degree 3) is built once per dataset by `make_feature_data`. `scaled_polynomial_features` computes each variable's powers once per chunk and forms every monomial as a product of gathered columns, instead of materialising a `(rows, 969, 16)` array. The result is bit-for-bit the previous one (it still uses the same `np.power` float32 loop, which is why even `x ** 1` is not replaced by `x`), and on the 60 000-row Split MNIST training set construction dropped from about 17 s to well under a second in the reference environment. The work is memory-bound (`np.power` itself is a small part), so the default chunk of 256 rows keeps the temporaries in cache; the result does not depend on the chunk size.
+
 ### Why old-class accuracy drops: takeover versus flips
 
 Two different mechanisms lower the accuracy on old classes, and the accuracy matrix alone cannot separate them. Every record carries both:
@@ -237,6 +263,7 @@ Run the scripts as `python experiments/<name>.py` from the repository root. Reus
 - Shared and binary code: `test_features` (ordering, counts, the shared enumeration and zero-expansion helpers, output-level expansion invariance for binary and multiclass), `test_binary_features`, `test_binary_expansion` (exact copy, zeros, identical scores and probabilities on train/eval/random/outside inputs, invariant checked every step of the loop), `test_binary_training` (finite-difference gradient, loss decrease, reproducibility, frozen coefficients, zero-init learning, per-coefficient learning rates, preservation tests, preset-override guard), `test_binary_replay`, `test_binary_data`, `test_binary_plotting`.
 - Synthetic data: `test_synthetic_data` (sinusoidal experiences bit-identical to the pre-refactor generator, circular target geometry, reproducibility, independent train/test streams, label noise), `test_joint_studies`.
 - Class-incremental code: `test_class_incremental` and `test_mnist` (features, expansion invariant and its guard, masked evaluation, forgetting definition, per-class accuracy, takeover versus flip diagnostics, determinism, offline Split MNIST), `test_multiclass_model`, `test_multiclass_training`, `test_strategies` (the update restrictions of the six strategies), `test_class_incremental_plotting`, `test_reporting_rows`.
+- Execution efficiency: `test_lean_mode` (feature construction bit-identical to the direct formula and free of its large temporary array; `diagnostics=False` learns exactly what the full run learns for every condition and update rule, skips every observing helper, keeps the sampling accounting; timings; helpers refusing a lean run; the `--no-diagnostics` flag).
 - Per-degree rates and sampling: `test_per_degree` (vector validation, per-group parameter updates, zero rates, masks, Strategy B, expansion, class counts, no future-class draws, reproducibility, accuracy/forgetting).
 - Replay and sampling: `test_replay_sampling` (memory draw and stored-index order, policy-to-sampler mapping, the trainer's injected sampler).
 - Structure: `test_architecture` (import graph without cycles, class-incremental code independent of the binary code, binary/model/trainer code independent of the class-incremental code, entry points not importing each other, no stale imports in source, tests, experiments and notebooks).
