@@ -21,6 +21,16 @@ def add_sampling_argument(p):
     )
 
 
+def add_diagnostics_argument(p):
+    p.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="also record the observation-only diagnostics of each run (loss passes, per-degree "
+        "statistics, old-class logit/flip/takeover indicators); off by default, and it does not "
+        "change training or the accuracy results",
+    )
+
+
 def add_dataset_arguments(p, required=True):
     p.add_argument(
         "--dataset", choices=("synthetic_2d", "split_mnist"), required=required

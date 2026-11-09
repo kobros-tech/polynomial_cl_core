@@ -60,6 +60,7 @@ def _run(data, strategy="ordinary", seed=2, **kwargs):
         "learning_rate": 0.05,
         "batch_size": 8,
         "n_ref_per_class": 1,
+        "diagnostics": True,  # most tests here read the diagnostics
     }
     return run_condition(
         "expanding",
@@ -917,6 +918,7 @@ def test_degree_group_rows_show_a_zero_rate_group_as_untrainable_and_unchanged()
         seed=0,
         epochs=1,
         learning_rate=[0.1, 0.1, 0.0, 0.1],
+        diagnostics=True,
     )
     rows = degree_group_rows(run)
     zero = [r for r in rows if r["degree"] == 2]

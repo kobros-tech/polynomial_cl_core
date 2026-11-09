@@ -37,7 +37,9 @@ def test_summary_rows_format_mean_and_std_for_every_condition(data):
 
 
 def test_old_class_and_strategy_rows_cover_the_right_experiences(data):
-    result = run_strategy_comparison(data, [0], epochs=1, memory_per_class=10)
+    result = run_strategy_comparison(
+        data, [0], epochs=1, memory_per_class=10, diagnostics=True
+    )
     run = next(r for r in result["runs"] if r["strategy"] == "strategy_b_new")
     assert [r["after_experience"] for r in old_class_rows(run)] == [2, 3, 4, 5]
     rows = strategy_diagnostic_rows(run)

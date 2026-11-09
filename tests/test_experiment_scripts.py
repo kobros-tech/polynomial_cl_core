@@ -2,22 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 import json
-import subprocess
-import sys
-from pathlib import Path
 
-import pytest
-
-ROOT = Path(__file__).parents[1]
-
-
-def run_script(name, *args):
-    return subprocess.run(
-        [sys.executable, str(ROOT / "experiments" / name), *map(str, args)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+from script_runner import run_script
 
 
 def test_class_incremental_script_writes_a_self_describing_json_result(tmp_path):
@@ -53,20 +39,15 @@ def test_class_incremental_script_writes_a_self_describing_json_result(tmp_path)
 
 
 def test_class_incremental_script_fails_cleanly_without_mnist_files(tmp_path):
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "experiments" / "class_incremental.py"),
-            "--dataset",
-            "split_mnist",
-            "--no-download",
-            "--data-dir",
-            str(tmp_path),
-            "--output",
-            str(tmp_path / "x.json"),
-        ],
-        capture_output=True,
-        text=True,
+    proc = run_script(
+        "class_incremental.py",
+        "--dataset",
+        "split_mnist",
+        "--no-download",
+        "--data-dir",
+        tmp_path,
+        "--output",
+        tmp_path / "x.json",
         check=False,
     )
     assert proc.returncode != 0 and "download is disabled" in proc.stderr
@@ -184,23 +165,18 @@ def test_rate_selection_script_selects_on_validation_and_reports_test(tmp_path):
 
 def test_rate_selection_rejects_overlapping_selection_and_test_seeds(tmp_path):
     out = tmp_path / "selection.json"
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "experiments" / "rate_selection.py"),
-            "--dataset",
-            "synthetic_2d",
-            "--select-seeds",
-            "0",
-            "1",
-            "--test-seeds",
-            "1",
-            "2",
-            "--output",
-            str(out),
-        ],
-        capture_output=True,
-        text=True,
+    proc = run_script(
+        "rate_selection.py",
+        "--dataset",
+        "synthetic_2d",
+        "--select-seeds",
+        0,
+        1,
+        "--test-seeds",
+        1,
+        2,
+        "--output",
+        out,
         check=False,
     )
     assert proc.returncode != 0 and not out.exists()
@@ -268,22 +244,21 @@ def test_per_degree_script_runs_study_then_epoch_robustness(tmp_path):
     )
     result = json.loads(longer.read_text())
     assert result["epochs"] == 2 and result["cells"][0]["selected"] == c["selected"]
-    with pytest.raises(
-        subprocess.CalledProcessError
-    ) as error:  # overlap rejected up front
-        run_script(
-            "per_degree_lr.py",
-            *common,
-            "--experiment",
-            "per-degree",
-            "--select-seeds",
-            1,
-            "--test-seeds",
-            1,
-            "--output",
-            tmp_path / "bad.json",
-        )
-    assert "overlap" in error.value.stderr and not (tmp_path / "bad.json").exists()
+    bad = run_script(  # overlap rejected up front
+        "per_degree_lr.py",
+        *common,
+        "--experiment",
+        "per-degree",
+        "--select-seeds",
+        1,
+        "--test-seeds",
+        1,
+        "--output",
+        tmp_path / "bad.json",
+        check=False,
+    )
+    assert bad.returncode != 0
+    assert "overlap" in bad.stderr and not (tmp_path / "bad.json").exists()
 
 
 def test_joint_training_script_binary_target_is_selectable_and_writes_scalars(tmp_path):
@@ -344,15 +319,5 @@ def test_joint_training_script_ten_class_reference(tmp_path):
 
 
 def test_joint_training_ten_class_requires_a_dataset():
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "experiments" / "joint_training.py"),
-            "--experiment",
-            "ten_class",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    proc = run_script("joint_training.py", "--experiment", "ten_class", check=False)
     assert proc.returncode != 0 and "--dataset" in proc.stderr

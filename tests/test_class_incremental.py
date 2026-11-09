@@ -222,6 +222,7 @@ def _run_all(data, seed=2):
             epochs=1,
             learning_rate=0.05,
             batch_size=8,
+            diagnostics=True,
         )
         for c in CONDITIONS
     }
@@ -396,6 +397,7 @@ def _strategy_runs(data, **kwargs):
             learning_rate=0.05,
             batch_size=8,
             strategy=s,
+            diagnostics=True,
             **kwargs,
         )
         for s in STRATEGIES
@@ -476,7 +478,9 @@ def test_new_class_takeover_is_separate_from_flips_among_old_classes(
 
     monkeypatch.setattr(experiment_module, "fit_task", boost_new_classes)
     tasks, memory = make_task_plan(tiny_data.train_y, 0, 2)
-    run = run_condition("fixed_linear", tiny_data, tasks, memory, seed=0, epochs=1)
+    run = run_condition(
+        "fixed_linear", tiny_data, tasks, memory, seed=0, epochs=1, diagnostics=True
+    )
     assert run["old_takeover_fraction_by_task"] == [None, 1.0, 1.0, 1.0, 1.0]
     assert run["old_flip_fraction_by_task"] == [None, 0.0, 0.0, 0.0, 0.0]
     assert run["old_logit_change_by_task"] == [None, 0.0, 0.0, 0.0, 0.0]
@@ -494,7 +498,9 @@ def test_takeover_bounds_the_accuracy_on_old_experiences(tiny_data):
     """
     tasks, memory = make_task_plan(tiny_data.train_y, 0, 2)
     for condition in CONDITIONS:
-        run = run_condition(condition, tiny_data, tasks, memory, seed=0, epochs=2)
+        run = run_condition(
+            condition, tiny_data, tasks, memory, seed=0, epochs=2, diagnostics=True
+        )
         for task in range(1, 5):
             old_accuracy = np.mean(run["accuracy_matrix"][task][:task])
             assert (
@@ -516,6 +522,7 @@ def test_strategy_comparison_pairs_strategies_within_a_seed(tiny_data):
         "learning_rate": 0.05,
         "batch_size": 8,
         "memory_per_class": 2,
+        "diagnostics": True,
     }
     result = run_strategy_comparison(tiny_data, [0, 1], **kwargs)
     assert result == run_strategy_comparison(tiny_data, [0, 1], **kwargs)
@@ -581,7 +588,13 @@ def test_preconditioned_null_projection_keeps_constraint_and_descends():
 
 def test_feature_power_runs_for_every_strategy_and_zero_is_the_default(tiny_data):
     tasks, memory = make_task_plan(tiny_data.train_y, 2, 2)
-    kwargs = {"seed": 2, "epochs": 1, "learning_rate": 0.05, "batch_size": 8}
+    kwargs = {
+        "seed": 2,
+        "epochs": 1,
+        "learning_rate": 0.05,
+        "batch_size": 8,
+        "diagnostics": True,
+    }
     default = run_condition("expanding", tiny_data, tasks, memory, **kwargs)
     assert default == run_condition(
         "expanding", tiny_data, tasks, memory, feature_power=0.0, **kwargs

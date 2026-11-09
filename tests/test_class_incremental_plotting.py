@@ -35,6 +35,7 @@ def test_class_incremental_plots_run_and_do_not_change_the_runs():
                 batch_size=8,
                 learning_rate=[0.1, 0.2, 0.05, 0.1],
                 sampling=policy,
+                diagnostics=True,
             )
             for s in (0, 1)
         ]

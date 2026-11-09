@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from ..continual.degree_study import mean_degree_diagnostic
+from ..continual.experiment import require_diagnostics
 
 _SAMPLING_STYLE = {"shuffled": ("o", "-"), "class_balanced": ("s", "--")}
 _DEGREE_COLORS = ("tab:gray", "tab:blue", "tab:orange", "tab:green")
@@ -187,6 +188,9 @@ def plot_cil_tradeoff(points, ax=None, title=None, annotate=True):
 
 def plot_cil_takeover_flips(runs_by_label, ax=None, title=None):
     """Old-class test inputs predicted as a NEW class (takeover) and moved among OLD classes."""
+    for runs in runs_by_label.values():
+        for run in runs:
+            require_diagnostics(run, "plot_cil_takeover_flips")
     ax = _cil_ax(ax, (7.0, 4.2))
     labels = list(runs_by_label)
     x = np.arange(len(labels))
