@@ -579,6 +579,36 @@ def test_timings_attribute_time_to_the_operation_they_name(tiny_data, monkeypatc
             assert timings[other] < 5 * delay * 0.9, (name, other, timings)
 
 
+def test_total_seconds_covers_work_after_the_experience_loop(tiny_data, monkeypatch):
+    # Forgetting is computed after the experience loop; the delay must show up in
+    # total_seconds and other_seconds, not vanish from the measurement.
+    import time
+
+    from polynomial_cl.continual import experiment as module
+
+    delay = 0.2
+    real = module.forgetting_from_matrix
+
+    def slow_forgetting(*args, **kwargs):
+        time.sleep(delay)
+        return real(*args, **kwargs)
+
+    tasks, memory = _plan(tiny_data)
+    baseline = {}
+    run_condition(
+        "expanding", tiny_data, tasks, memory, seed=3, timings=baseline, **KWARGS
+    )
+    monkeypatch.setattr(module, "forgetting_from_matrix", slow_forgetting)
+    timings = {}
+    run_condition(
+        "expanding", tiny_data, tasks, memory, seed=3, timings=timings, **KWARGS
+    )
+    assert timings["other_seconds"] >= delay * 0.9
+    assert timings["total_seconds"] >= delay * 0.9 + 0.5 * baseline["total_seconds"]
+    for bucket in ("training_seconds", "evaluation_seconds", "diagnostics_seconds"):
+        assert timings[bucket] < delay * 0.9, (bucket, timings)
+
+
 def test_the_default_run_reports_exactly_zero_diagnostics_time(tiny_data):
     tasks, memory = _plan(tiny_data)
     timings = {}

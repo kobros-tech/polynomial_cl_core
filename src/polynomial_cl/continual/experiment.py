@@ -391,7 +391,9 @@ def run_condition(
     deterministic) receives the wall-clock seconds of this call split into
     ``training_seconds`` (``fit_task``), ``evaluation_seconds`` (the accuracy matrix),
     ``diagnostics_seconds`` (0.0 when ``diagnostics=False``), ``other_seconds`` (plan
-    bookkeeping, expansion check, update restrictions) and their sum ``total_seconds``.
+    bookkeeping, expansion check, update restrictions, forgetting, diagnostic aggregation and
+    building the record) and their sum ``total_seconds``, which is the wall-clock time of the
+    whole call from after argument validation to just before the record is returned.
     """
     if condition not in CONDITIONS:
         raise ValueError(f"unknown condition: {condition}")
@@ -582,16 +584,6 @@ def run_condition(
         )[: task + 1]
         spent["evaluation"] += time.perf_counter() - mark
 
-    if timings is not None:
-        total = time.perf_counter() - run_started
-        timings.update(
-            training_seconds=spent["training"],
-            evaluation_seconds=spent["evaluation"],
-            diagnostics_seconds=spent["diagnostics"],
-            other_seconds=total - sum(spent.values()),
-            total_seconds=total,
-        )
-
     # Forgetting of an experience: best accuracy it ever had minus its final accuracy
     # (shared definition from polynomial_cl.metrics; the lower triangle has no NaN).
     forgetting = [float(v) for v in forgetting_from_matrix(matrix, n_tasks - 1)]
@@ -613,7 +605,7 @@ def run_condition(
                 np.mean([b - a for b, a in indicators["train_loss_by_task"]])
             ),
         }
-    return {
+    record = {
         "condition": condition,
         "strategy": strategy,
         "seed": seed,
@@ -648,6 +640,18 @@ def run_condition(
         "mean_forgetting": float(np.mean(forgetting[:-1])),
         **observed,
     }
+    # Taken last, so ``total_seconds`` spans the whole call; the forgetting calculation,
+    # diagnostic aggregation and record construction above count towards ``other_seconds``.
+    if timings is not None:
+        total = time.perf_counter() - run_started
+        timings.update(
+            training_seconds=spent["training"],
+            evaluation_seconds=spent["evaluation"],
+            diagnostics_seconds=spent["diagnostics"],
+            other_seconds=total - sum(spent.values()),
+            total_seconds=total,
+        )
+    return record
 
 
 def summarize_runs(runs):
