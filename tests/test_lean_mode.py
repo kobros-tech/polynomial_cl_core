@@ -391,10 +391,18 @@ def test_diagnostics_can_be_enabled_through_every_comparison_function(tiny_data)
     )
     assert all(r["diagnostics"] is True for r in conditions["runs"])
     assert all(r["diagnostics"] is True for r in strategies["runs"])
-    sampling = continual.run_sampling_comparison(
-        tiny_data, [0], strategies=("ordinary",), memory_per_class=2, **kwargs
-    )
-    assert all(r["diagnostics"] is False for p in sampling.values() for r in p["runs"])
+    for flag in (False, True):  # the default (off) and the explicit opt-in
+        options = {"diagnostics": flag} if flag else {}
+        sampling = continual.run_sampling_comparison(
+            tiny_data,
+            [0],
+            strategies=("ordinary",),
+            memory_per_class=2,
+            **options,
+            **kwargs,
+        )
+        runs = [r for p in sampling.values() for r in p["runs"]]
+        assert runs and all(r["diagnostics"] is flag for r in runs)
 
 
 def test_comparison_summary_is_identical_with_and_without_diagnostics(tiny_data):
@@ -579,34 +587,90 @@ def test_timings_attribute_time_to_the_operation_they_name(tiny_data, monkeypatc
             assert timings[other] < 5 * delay * 0.9, (name, other, timings)
 
 
-def test_total_seconds_covers_work_after_the_experience_loop(tiny_data, monkeypatch):
-    # Forgetting is computed after the experience loop; the delay must show up in
-    # total_seconds and other_seconds, not vanish from the measurement.
+def _delayed_total(tiny_data, monkeypatch, name, delay=0.1, **options):
+    """Run once with ``name`` of the experiment module slowed down; return the timings."""
     import time
 
     from polynomial_cl.continual import experiment as module
 
-    delay = 0.2
-    real = module.forgetting_from_matrix
+    real = getattr(module, name)
 
-    def slow_forgetting(*args, **kwargs):
+    def slowed(*args, **kwargs):
         time.sleep(delay)
         return real(*args, **kwargs)
 
+    monkeypatch.setattr(module, name, slowed)
     tasks, memory = _plan(tiny_data)
-    baseline = {}
-    run_condition(
-        "expanding", tiny_data, tasks, memory, seed=3, timings=baseline, **KWARGS
-    )
-    monkeypatch.setattr(module, "forgetting_from_matrix", slow_forgetting)
     timings = {}
     run_condition(
-        "expanding", tiny_data, tasks, memory, seed=3, timings=timings, **KWARGS
-    )
-    assert timings["other_seconds"] >= delay * 0.9
-    assert timings["total_seconds"] >= delay * 0.9 + 0.5 * baseline["total_seconds"]
+        "expanding", tiny_data, tasks, memory, seed=3, timings=timings, **KWARGS,
+        **options,
+    )  # fmt: skip
+    monkeypatch.undo()
+    return timings
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "as_degree_rates",  # first work after the argument validation
+        "degree_of_feature",  # run initialisation, before the experience loop
+        "forgetting_from_matrix",  # after the loop, while the record is built
+    ],
+)
+def test_total_covers_the_whole_call_and_the_delay_lands_in_other(
+    tiny_data, monkeypatch, name
+):
+    delay = 0.1
+    timings = _delayed_total(tiny_data, monkeypatch, name, delay)
+    assert timings["total_seconds"] >= delay * 0.9, (name, timings)
+    assert timings["other_seconds"] >= delay * 0.9, (name, timings)
     for bucket in ("training_seconds", "evaluation_seconds", "diagnostics_seconds"):
-        assert timings[bucket] < delay * 0.9, (bucket, timings)
+        assert timings[bucket] < delay * 0.9, (name, bucket, timings)
+    parts = sum(v for k, v in timings.items() if k != "total_seconds")
+    assert parts == pytest.approx(timings["total_seconds"])
+
+
+class _SlowConcatenate(_CountingNumpy):
+    """Counting stand-in whose ``concatenate`` also takes ``delay`` seconds."""
+
+    def __init__(self, delay):
+        super().__init__()
+        self.delay = delay
+
+    def concatenate(self, *args, **kwargs):
+        import time
+
+        time.sleep(self.delay)
+        return super().concatenate(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "options, bucket, other",
+    [
+        # stacked only for the loss passes: its cost is part of the diagnostics
+        ({"diagnostics": True}, "diagnostics_seconds", "other_seconds"),
+        # stacked for the feature rescaling: ordinary work, not diagnostics
+        ({"feature_power": 1.0}, "other_seconds", "diagnostics_seconds"),
+    ],
+)
+def test_the_stacked_training_set_is_timed_as_what_needs_it(
+    tiny_data, monkeypatch, options, bucket, other
+):
+    from polynomial_cl.continual import experiment as module
+
+    slow = _SlowConcatenate(0.05)
+    monkeypatch.setattr(module, "np", slow)
+    tasks, memory = _plan(tiny_data)
+    timings = {}
+    run_condition(
+        "expanding", tiny_data, tasks, memory, seed=3, timings=timings, **KWARGS,
+        **options,
+    )  # fmt: skip
+    cost = slow.concatenations * slow.delay
+    assert slow.concatenations > 0
+    assert timings[bucket] >= cost * 0.9, timings
+    assert timings[other] < cost * 0.5, timings
 
 
 def test_the_default_run_reports_exactly_zero_diagnostics_time(tiny_data):

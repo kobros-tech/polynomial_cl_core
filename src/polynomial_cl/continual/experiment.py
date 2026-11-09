@@ -388,12 +388,13 @@ def run_condition(
     reading it fails loudly instead of yielding ``None``.
 
     ``timings`` (an optional dict, filled in place so the returned record stays
-    deterministic) receives the wall-clock seconds of this call split into
-    ``training_seconds`` (``fit_task``), ``evaluation_seconds`` (the accuracy matrix),
-    ``diagnostics_seconds`` (0.0 when ``diagnostics=False``), ``other_seconds`` (plan
-    bookkeeping, expansion check, update restrictions, forgetting, diagnostic aggregation and
-    building the record) and their sum ``total_seconds``, which is the wall-clock time of the
-    whole call from after argument validation to just before the record is returned.
+    deterministic) receives the wall-clock seconds of this call, measured from just after
+    argument validation until the record is complete: ``training_seconds`` (``fit_task``),
+    ``evaluation_seconds`` (the accuracy matrix), ``diagnostics_seconds`` (all observation
+    work, including the stacked training set when only the loss passes need it and the
+    aggregation of the indicators; 0.0 without diagnostics), ``other_seconds`` (everything
+    else: allocation, expansion check, update restrictions, forgetting, building the record)
+    and their sum ``total_seconds``.
     """
     if condition not in CONDITIONS:
         raise ValueError(f"unknown condition: {condition}")
@@ -405,6 +406,8 @@ def run_condition(
         raise ValueError(
             "a per-degree learning-rate vector cannot be combined with feature_power"
         )
+    spent = {"training": 0.0, "evaluation": 0.0, "diagnostics": 0.0}
+    run_started = time.perf_counter()  # everything below is part of the timed call
     rate_vector = as_degree_rates(learning_rate)
     degrees = DEGREES[condition]
     n_tasks = len(degrees)
@@ -420,8 +423,6 @@ def run_condition(
     degree_diag = {k: [] for k in DEGREE_DIAGNOSTICS}
     sampling_log = []
     group_index_full = degree_of_feature(data.n_components, MAX_DEGREE)
-    spent = {"training": 0.0, "evaluation": 0.0, "diagnostics": 0.0}
-    run_started = time.perf_counter()
 
     for task, indices in enumerate(task_indices):
         old_rows = weights.shape[0] if task else 0
@@ -448,12 +449,15 @@ def run_condition(
         # The stacked training set is read only by the feature rescaling and by the
         # diagnostics' loss passes; fit_task takes the current and replay parts separately.
         if diagnostics or feature_power:
+            stacking_started = time.perf_counter()
             train_x = np.concatenate(
                 [data.train_x[indices, :count], data.train_x[replay, :count]]
             )
             train_y = data.train_y[np.concatenate([indices, replay])].astype(
                 np.int64, copy=False
             )
+            if not feature_power:  # built only for the diagnostics' loss passes
+                spent["diagnostics"] += time.perf_counter() - stacking_started
         feature_scale = None
         if feature_power:
             rms = np.sqrt(np.mean(train_x.astype(np.float64) ** 2, axis=0))
@@ -589,6 +593,7 @@ def run_condition(
     forgetting = [float(v) for v in forgetting_from_matrix(matrix, n_tasks - 1)]
     observed_degree, observed = {}, {}
     if diagnostics:
+        mark = time.perf_counter()
         observed_degree = {"degree_diagnostics": degree_diag}
         observed = {
             **indicators,
@@ -605,6 +610,7 @@ def run_condition(
                 np.mean([b - a for b, a in indicators["train_loss_by_task"]])
             ),
         }
+        spent["diagnostics"] += time.perf_counter() - mark
     record = {
         "condition": condition,
         "strategy": strategy,
@@ -640,9 +646,7 @@ def run_condition(
         "mean_forgetting": float(np.mean(forgetting[:-1])),
         **observed,
     }
-    # Taken last, so ``total_seconds`` spans the whole call; the forgetting calculation,
-    # diagnostic aggregation and record construction above count towards ``other_seconds``.
-    if timings is not None:
+    if timings is not None:  # last, so the whole call is inside the total
         total = time.perf_counter() - run_started
         timings.update(
             training_seconds=spent["training"],

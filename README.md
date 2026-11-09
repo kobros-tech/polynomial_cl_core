@@ -122,6 +122,8 @@ run_condition("expanding", data, tasks, memory, seed=0, timings=timings)
 #  'other_seconds': ..., 'total_seconds': ...}
 ```
 
+`total_seconds` covers the whole call from just after argument validation until the record is complete, and is the sum of the other four. `diagnostics_seconds` is all observation work (including the stacked training set when only the loss passes need it) and is exactly `0.0` without diagnostics; `other_seconds` is everything else, such as allocation, forgetting and building the record. Timings are never part of the record.
+
 The polynomial design matrix (969 columns for 16 variables at degree 3) is built once per dataset by `make_feature_data`. `scaled_polynomial_features` computes each variable's powers once per chunk and forms every monomial as a product of gathered columns, instead of materialising a `(rows, 969, 16)` array. The result is bit-for-bit the previous one (it still uses the same `np.power` float32 loop, which is why even `x ** 1` is not replaced by `x`), and on the 60 000-row Split MNIST training set construction dropped from about 17 s to well under a second in the reference environment. The work is memory-bound (`np.power` itself is a small part), so the default chunk of 256 rows keeps the temporaries in cache; the result does not depend on the chunk size.
 
 ### Why old-class accuracy drops: takeover versus flips
