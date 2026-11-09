@@ -50,6 +50,7 @@ from .experiment import (
     STRATEGIES,
     STRATEGY_METRICS,
     make_task_plan,
+    recorded_metrics,
     require_diagnostics,
     run_condition,
 )
@@ -84,6 +85,7 @@ def _run_seeds(data, seeds, strategy, rates, *, sampling, settings, log=None, la
                 strategy=strategy,
                 n_ref_per_class=settings["n_ref_per_class"],
                 sampling=sampling,
+                diagnostics=settings["diagnostics"],
             )
         )
         if log:
@@ -96,8 +98,9 @@ def _run_seeds(data, seeds, strategy, rates, *, sampling, settings, log=None, la
     return runs
 
 
-def _settings(epochs, batch_size, memory_per_class, n_ref_per_class):
+def _settings(epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics=False):
     return {
+        "diagnostics": diagnostics,
         "epochs": epochs,
         "batch_size": batch_size,
         "memory_per_class": memory_per_class,
@@ -163,10 +166,13 @@ def run_sampling_comparison(
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
+    diagnostics=False,
     log=None,
 ):
     """Same strategies, rate, seeds and replay memory under each sampling policy."""
-    settings = _settings(epochs, batch_size, memory_per_class, n_ref_per_class)
+    settings = _settings(
+        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics
+    )
     out = {}
     for policy in policies:
         runs = [
@@ -185,7 +191,9 @@ def run_sampling_comparison(
         ]
         out[policy] = {
             "runs": runs,
-            "summary": mean_std_by_condition(runs, TRADEOFF_METRICS, key="strategy"),
+            "summary": mean_std_by_condition(
+                runs, recorded_metrics(runs, TRADEOFF_METRICS), key="strategy"
+            ),
         }
     return out
 
@@ -238,14 +246,19 @@ def select_rate_vectors(
     shared_grid=SHARED_RATE_GRID,
     factors=RATE_FACTORS,
     min_current_accuracy=None,
+    diagnostics=False,
     log=None,
 ):
     """Stages 1-3 on validation data for one (strategy, sampling) cell.
 
     Returns the candidate vectors (name -> vector), their validation metrics (mean over the
-    selection seeds), the Pareto front, and the name chosen by the selection rule.
+    selection seeds), the Pareto front, and the name chosen by the selection rule. The
+    selection reads only accuracy and forgetting, so ``diagnostics`` (off by default) only
+    decides what the validation runs record.
     """
-    settings = _settings(epochs, batch_size, memory_per_class, n_ref_per_class)
+    settings = _settings(
+        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics
+    )
 
     tag = f"[{strategy}/{sampling}]"
 
@@ -313,10 +326,13 @@ def evaluate_vectors(
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
+    diagnostics=False,
     log=None,
 ):
     """Run every named vector on the test data; returns name -> list of run records."""
-    settings = _settings(epochs, batch_size, memory_per_class, n_ref_per_class)
+    settings = _settings(
+        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics
+    )
     out = {}
     for i, (name, vector) in enumerate(vectors.items(), 1):
         if log:
@@ -349,7 +365,9 @@ def run_per_degree_study(
 ):
     """Selection on validation data, then test evaluation, for every (strategy, sampling).
 
-    The selection and test seeds must be disjoint. Returns a JSON-serialisable dict.
+    The selection and test seeds must be disjoint. Returns a JSON-serialisable dict. Settings
+    (``epochs``, ``batch_size``, ``memory_per_class``, ``n_ref_per_class`` and ``diagnostics``,
+    off by default) are passed on to the selection and test runs.
     """
     shared = sorted(set(selection_seeds) & set(test_seeds))
     if shared:
@@ -395,9 +413,15 @@ def run_per_degree_study(
     }
 
 
-def vector_summary(runs, metrics=TRADEOFF_METRICS):
-    """Mean and sample std over seeds of the trade-off metrics for one list of runs."""
+def vector_summary(runs, metrics=None):
+    """Mean and sample std over seeds of the trade-off metrics for one list of runs.
+
+    Default ``metrics``: ``TRADEOFF_METRICS`` for runs made with diagnostics, otherwise the
+    accuracy and forgetting summary metrics (see ``recorded_metrics``).
+    """
     out = {}
+    if metrics is None:
+        metrics = recorded_metrics(runs, TRADEOFF_METRICS)
     for metric in metrics:
         values = np.array([r[metric] for r in runs], dtype=float)
         out[metric] = {
@@ -466,6 +490,7 @@ def run_epoch_robustness(
     n_ref_per_class=N_REF_PER_CLASS,
     strategies=None,
     samplings=None,
+    diagnostics=False,
     log=None,
 ):
     """Re-run the shared reference and the selected vector of every cell at another epoch count.
@@ -495,6 +520,7 @@ def run_epoch_robustness(
             batch_size=batch_size,
             memory_per_class=memory_per_class,
             n_ref_per_class=n_ref_per_class,
+            diagnostics=diagnostics,
             log=log,
         )
         cells.append(
@@ -548,21 +574,21 @@ def study_rows(study):
             if name not in ("shared", cell["selected"]):
                 continue
             s = vector_summary(runs)
-            rows.append(
-                {
-                    "sampling": cell["sampling"][:5],
-                    "strategy": cell["strategy"],
-                    "vector": name
-                    + ("*" if name == cell["selected"] else "")
-                    + ("^" if name in cell["pareto"] else ""),
-                    "rates d0..d3": " ".join(f"{v:g}" for v in cell["vectors"][name]),
-                    "acc": f"{s['final_mean_accuracy']['mean']:.3f}+/-{s['final_mean_accuracy']['std']:.3f}",
-                    "newest": f"{s['final_current_accuracy']['mean']:.3f}",
-                    "forget": f"{s['mean_forgetting']['mean']:.3f}",
-                    "takeover": f"{s['mean_old_takeover_fraction']['mean']:.3f}",
-                    "flips": f"{s['mean_old_flip_fraction']['mean']:.3f}",
-                }
-            )
+            row = {
+                "sampling": cell["sampling"][:5],
+                "strategy": cell["strategy"],
+                "vector": name
+                + ("*" if name == cell["selected"] else "")
+                + ("^" if name in cell["pareto"] else ""),
+                "rates d0..d3": " ".join(f"{v:g}" for v in cell["vectors"][name]),
+                "acc": f"{s['final_mean_accuracy']['mean']:.3f}+/-{s['final_mean_accuracy']['std']:.3f}",
+                "newest": f"{s['final_current_accuracy']['mean']:.3f}",
+                "forget": f"{s['mean_forgetting']['mean']:.3f}",
+            }
+            if "mean_old_takeover_fraction" in s:  # runs made with diagnostics
+                row["takeover"] = f"{s['mean_old_takeover_fraction']['mean']:.3f}"
+                row["flips"] = f"{s['mean_old_flip_fraction']['mean']:.3f}"
+            rows.append(row)
     return rows
 
 

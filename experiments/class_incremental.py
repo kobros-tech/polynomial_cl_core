@@ -12,7 +12,12 @@ import argparse
 import json
 from pathlib import Path
 
-from common import add_dataset_arguments, add_sampling_argument, load_dataset
+from common import (
+    add_dataset_arguments,
+    add_diagnostics_argument,
+    add_sampling_argument,
+    load_dataset,
+)
 
 from polynomial_cl.continual import (
     TASK_ORDER,
@@ -45,12 +50,7 @@ def main():
         "--n-ref-per-class", type=int, default=N_REF_PER_CLASS, help="strategy_b only"
     )
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument(
-        "--no-diagnostics",
-        action="store_true",
-        help="lean mode for --experiment conditions: same accuracy and forgetting, skip the "
-        "observation-only indicators (loss, per-degree statistics, old-class logit changes)",
-    )
+    add_diagnostics_argument(p)
     add_sampling_argument(p)
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     p.add_argument("--epochs", type=int, default=EPOCHS)
@@ -74,8 +74,6 @@ def main():
         p.error("at least one seed is required")
     if min(args.epochs, args.batch_size, args.memory_per_class) < 1:
         p.error("epochs, batch-size and memory-per-class must be positive")
-    if args.no_diagnostics and args.experiment == "strategies":
-        p.error("--no-diagnostics applies to --experiment conditions only")
 
     train_x, train_y, test_x, test_y, data_settings = load_dataset(args)
     if args.validation_fraction:
@@ -95,11 +93,15 @@ def main():
     data = make_feature_data(train_x, train_y, test_x, test_y)
     if args.experiment == "strategies":
         result = run_strategy_comparison(
-            data, args.seeds, n_ref_per_class=args.n_ref_per_class, **settings
+            data,
+            args.seeds,
+            n_ref_per_class=args.n_ref_per_class,
+            diagnostics=args.diagnostics,
+            **settings,
         )
     else:
         result = run_comparison(
-            data, args.seeds, diagnostics=not args.no_diagnostics, **settings
+            data, args.seeds, diagnostics=args.diagnostics, **settings
         )
     payload = {
         "dataset": args.dataset,
@@ -116,6 +118,7 @@ def main():
             "degrees_by_condition": {name: list(d) for name, d in DEGREES.items()},
             "strategies": list(STRATEGIES) if args.experiment == "strategies" else None,
             "n_ref_per_class": args.n_ref_per_class,
+            "diagnostics": args.diagnostics,
             **data_settings,
         },
         **result,

@@ -3,24 +3,26 @@
 
 """Execution efficiency must never change what is learned.
 
-Two speed-ups are guarded here against the behaviour they replaced:
+Guarded here against the behaviour it replaced:
 
 * the factor-table construction of ``scaled_polynomial_features`` must reproduce the direct
   ``(chunk, features, variables)`` formula bit for bit and must not allocate that array;
-* ``run_condition(..., diagnostics=False)`` skips only observation-only work, so everything
-  that describes the learning run is identical to a ``diagnostics=True`` run.
+* diagnostics are opt-in everywhere (API and command line) and are pure observation: a run with
+  ``diagnostics=True`` learns, expands and evaluates exactly like the default run, and the
+  default run does none of the observation work and records none of its fields;
+* timings are reported only when asked for.
 """
 
+import inspect
 import json
 import math
-import subprocess
-import sys
 import tracemalloc
-from pathlib import Path
 
 import numpy as np
 import pytest
+from script_runner import run_script
 
+from polynomial_cl import continual
 from polynomial_cl.continual import (
     CONDITIONS,
     STRATEGIES,
@@ -33,15 +35,11 @@ from polynomial_cl.continual import (
     run_condition,
     strategy_diagnostic_rows,
 )
-from polynomial_cl.continual.experiment import (
-    DEGREE_DIAGNOSTICS,
-    INDICATORS,
-)
+from polynomial_cl.continual.degree_study import study_rows, vector_summary
+from polynomial_cl.continual.experiment import INDICATORS
 from polynomial_cl.continual.features import scaled_polynomial_features
 from polynomial_cl.data import make_synthetic_2d
 from polynomial_cl.features import monomial_exponents
-
-ROOT = Path(__file__).parents[1]
 
 
 # The previous implementation, kept verbatim as the oracle for bit-for-bit equivalence.
@@ -91,6 +89,52 @@ def test_features_reproduce_the_power_loop_on_many_rows(degree):
     assert np.array_equal(got, reference_features(x, degree))
 
 
+@pytest.mark.parametrize("n_variables, degree", [(1, 3), (2, 3), (3, 4), (16, 3)])
+def test_features_match_an_independent_float64_evaluation(n_variables, degree):
+    # The oracle above is the previous implementation; this one shares no code with either:
+    # explicit monomials in float64, scaled by the size of their degree group.
+    x = np.random.default_rng(n_variables).uniform(-1.5, 1.5, (23, n_variables))
+    x32 = x.astype(np.float32)
+    got = scaled_polynomial_features(x32, degree)
+    exponents = monomial_exponents(n_variables, degree)
+    assert got.shape == (23, math.comb(n_variables + degree, degree))
+    assert got.shape[1] == len(exponents) and got.dtype == np.float32
+    total = exponents.sum(axis=1)
+    assert np.all(np.diff(total) >= 0)  # constant, then degree 1, 2, ...
+    expected = np.prod(x32.astype(np.float64)[:, None, :] ** exponents[None], axis=2)
+    for d in range(degree + 1):
+        group = total == d
+        assert group.sum() == math.comb(n_variables + d - 1, d)  # monomials of degree d
+        scale = 1.0 / math.sqrt(group.sum()) if d else 1.0
+        np.testing.assert_allclose(
+            got[:, group], expected[:, group] * scale, rtol=2e-6, atol=2e-7
+        )
+    assert np.all(got[:, 0] == 1.0)  # the constant feature is unscaled
+
+
+@pytest.mark.parametrize("rows", [1, 3, 4, 5, 8, 9, 12])
+def test_chunk_boundaries_do_not_change_the_result(rows):
+    x = np.random.default_rng(rows).normal(size=(rows, 5)).astype(np.float32)
+    whole = scaled_polynomial_features(x, 3, chunk_size=rows + 1)
+    for chunk_size in (1, 2, 4):  # rows below, at and across a multiple of the chunk
+        chunked = scaled_polynomial_features(x, 3, chunk_size=chunk_size)
+        assert np.array_equal(chunked, whole), (rows, chunk_size)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"x": np.zeros(5), "degree": 3},  # not two-dimensional
+        {"x": np.zeros((3, 0)), "degree": 3},  # no variables
+        {"x": np.zeros((3, 2)), "degree": -1},
+        {"x": np.zeros((3, 2)), "degree": 3, "chunk_size": 0},
+    ],
+)
+def test_invalid_feature_arguments_are_rejected(bad):
+    with pytest.raises(ValueError):
+        scaled_polynomial_features(**bad)
+
+
 def test_features_of_no_rows_is_an_empty_matrix_of_the_right_width():
     out = scaled_polynomial_features(np.empty((0, 4), np.float32), 3)
     assert out.shape == (0, math.comb(4 + 3, 3))
@@ -119,7 +163,45 @@ def test_the_cached_layout_is_read_only_so_callers_cannot_corrupt_it():
         assert not array.flags.writeable
 
 
-# ------------------------------------------------------------------ lean run mode
+# ------------------------------------------------------------------ opt-in diagnostics
+def _functions_with_a_diagnostics_parameter():
+    modules = (continual, continual.degree_study, continual.experiment)
+    found = {}
+    for module in modules:
+        for name, function in vars(module).items():
+            if inspect.isfunction(function):
+                if "diagnostics" in inspect.signature(function).parameters:
+                    found[name] = function
+    return found
+
+
+def test_diagnostics_default_to_off_in_every_function_that_takes_them():
+    found = _functions_with_a_diagnostics_parameter()
+    # Every entry point that can run a polynomial experiment must be here, so that a new
+    # one cannot quietly default the other way.
+    expected = {
+        "run_condition",
+        "run_comparison",
+        "run_strategy_comparison",
+        "run_sampling_comparison",
+        "select_rate_vectors",
+        "evaluate_vectors",
+        "run_epoch_robustness",
+        "_settings",
+    }
+    assert expected <= set(found), expected - set(found)
+    for name, function in found.items():
+        default = inspect.signature(function).parameters["diagnostics"].default
+        assert default is False, f"{name} defaults diagnostics to {default!r}"
+
+
+def test_the_study_runner_passes_diagnostics_on_and_defaults_to_off():
+    # run_per_degree_study forwards **settings to the selection and test runs; its own
+    # signature has no explicit parameter, so the default comes from those functions.
+    parameters = inspect.signature(continual.run_per_degree_study).parameters
+    assert "diagnostics" not in parameters and "settings" in parameters
+
+
 @pytest.fixture(scope="module")
 def tiny_data():
     x_train, y_train, x_test, y_test, _ = make_synthetic_2d(
@@ -153,104 +235,132 @@ LEARNING_FIELDS = (
     "sampling",
     "sampling_by_task",
 )
+# The fields that exist only because a run was observed.
+OBSERVATION_FIELDS = {
+    "degree_diagnostics",
+    *INDICATORS,
+    "mean_old_logit_change",
+    "mean_old_flip_fraction",
+    "mean_old_takeover_fraction",
+    "mean_loss_reduction",
+}
+
+
+def _plan(data, seed=3, memory=2):
+    return make_task_plan(data.train_y, seed, memory)
 
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
 @pytest.mark.parametrize("condition", CONDITIONS)
-def test_lean_run_learns_exactly_what_the_full_run_learns(
-    tiny_data, condition, strategy
-):
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
-    full = run_condition(
-        condition, tiny_data, tasks, memory, seed=3, strategy=strategy, **KWARGS
-    )
-    lean = run_condition(
-        condition,
-        tiny_data,
-        tasks,
-        memory,
-        seed=3,
-        strategy=strategy,
-        diagnostics=False,
-        **KWARGS,
+def test_diagnostics_do_not_change_what_is_learned(tiny_data, condition, strategy):
+    tasks, memory = _plan(tiny_data)
+    kwargs = {"seed": 3, "strategy": strategy, **KWARGS}
+    default = run_condition(condition, tiny_data, tasks, memory, **kwargs)
+    observed = run_condition(
+        condition, tiny_data, tasks, memory, diagnostics=True, **kwargs
     )
     for field in LEARNING_FIELDS:
-        assert lean[field] == full[field], field
+        assert observed[field] == default[field], field
 
 
 @pytest.mark.parametrize("sampling", ["shuffled", "class_balanced"])
-def test_lean_run_keeps_the_sampling_accounting(tiny_data, sampling):
-    tasks, memory = make_task_plan(tiny_data.train_y, 4, 2)
+def test_diagnostics_do_not_change_the_sampling_accounting(tiny_data, sampling):
+    tasks, memory = _plan(tiny_data, 4)
     kwargs = {"seed": 4, "sampling": sampling, **KWARGS}
-    full = run_condition("expanding", tiny_data, tasks, memory, **kwargs)
-    lean = run_condition(
-        "expanding", tiny_data, tasks, memory, diagnostics=False, **kwargs
+    default = run_condition("expanding", tiny_data, tasks, memory, **kwargs)
+    observed = run_condition(
+        "expanding", tiny_data, tasks, memory, diagnostics=True, **kwargs
     )
-    assert lean["sampling_by_task"] == full["sampling_by_task"]
-    assert lean["accuracy_matrix"] == full["accuracy_matrix"]
+    assert observed["sampling_by_task"] == default["sampling_by_task"]
+    assert observed["accuracy_matrix"] == default["accuracy_matrix"]
 
 
-def test_lean_run_works_with_feature_power_and_per_degree_rates(tiny_data):
-    tasks, memory = make_task_plan(tiny_data.train_y, 5, 2)
-    for extra in ({"feature_power": 1.0}, {"learning_rate": [0.05, 0.02, 0.01, 0.01]}):
-        kwargs = {**KWARGS, "seed": 5, **extra}
-        full = run_condition("expanding", tiny_data, tasks, memory, **kwargs)
-        lean = run_condition(
-            "expanding", tiny_data, tasks, memory, diagnostics=False, **kwargs
-        )
-        for field in LEARNING_FIELDS:
-            assert lean[field] == full[field], (field, extra)
-
-
-def test_lean_record_marks_itself_and_leaves_every_diagnostic_empty(tiny_data):
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
-    lean = run_condition(
-        "expanding", tiny_data, tasks, memory, seed=3, diagnostics=False, **KWARGS
+@pytest.mark.parametrize(
+    "extra", [{"feature_power": 1.0}, {"learning_rate": [0.05, 0.02, 0.01, 0.01]}]
+)
+def test_diagnostics_do_not_change_feature_power_or_per_degree_runs(tiny_data, extra):
+    tasks, memory = _plan(tiny_data, 5)
+    kwargs = {**KWARGS, "seed": 5, **extra}
+    default = run_condition("expanding", tiny_data, tasks, memory, **kwargs)
+    observed = run_condition(
+        "expanding", tiny_data, tasks, memory, diagnostics=True, **kwargs
     )
-    full = run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
-    assert lean["diagnostics"] is False and full["diagnostics"] is True
-    assert set(lean) == set(full)  # same schema, only the values are missing
-    for key in INDICATORS:
-        assert lean[key] == [None] * 5, key
-    for key in DEGREE_DIAGNOSTICS:
-        assert lean["degree_diagnostics"][key] == [[None] * 4] * 5, key
-    for key in (
-        "mean_old_logit_change",
-        "mean_old_flip_fraction",
-        "mean_old_takeover_fraction",
-        "mean_loss_reduction",
-    ):
-        assert lean[key] is None and full[key] is not None, key
-    json.dumps(lean, allow_nan=False)  # still a plain JSON record
+    for field in LEARNING_FIELDS:
+        assert observed[field] == default[field], field
 
 
-def test_diagnostics_are_on_by_default_and_the_default_record_is_unchanged(tiny_data):
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
+def test_the_default_record_has_no_observation_fields(tiny_data):
+    tasks, memory = _plan(tiny_data)
     default = run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
-    explicit = run_condition(
+    observed = run_condition(
         "expanding", tiny_data, tasks, memory, seed=3, diagnostics=True, **KWARGS
     )
-    assert default == explicit
-    assert default["diagnostics"] is True
-    assert all(v is not None for v in default["train_loss_by_task"])
+    assert default["diagnostics"] is False and observed["diagnostics"] is True
+    assert not OBSERVATION_FIELDS & set(default)
+    assert OBSERVATION_FIELDS <= set(observed)
+    # Nothing but the observation fields (and the flag's value) differs between the two.
+    assert set(observed) - set(default) == OBSERVATION_FIELDS
+    assert all(v is not None for v in observed["train_loss_by_task"])
+    json.dumps(default, allow_nan=False)  # plain JSON, no None placeholders to filter
 
 
-def test_lean_run_calls_no_diagnostic_helper(tiny_data, monkeypatch):
+def test_reading_an_unmeasured_field_fails_loudly(tiny_data):
+    tasks, memory = _plan(tiny_data)
+    default = run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
+    with pytest.raises(KeyError):
+        default["mean_old_flip_fraction"]
+
+
+def test_the_default_run_calls_no_diagnostic_helper(tiny_data, monkeypatch):
     from polynomial_cl.continual import experiment as module
 
     def forbidden(*args, **kwargs):
-        raise AssertionError("diagnostic work ran in lean mode")
+        raise AssertionError("diagnostic work ran without diagnostics=True")
 
     for name in ("_degree_diagnostics", "_record_indicators", "cross_entropy"):
         monkeypatch.setattr(module, name, forbidden)
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
-    run = run_condition(
-        "expanding", tiny_data, tasks, memory, seed=3, diagnostics=False, **KWARGS
-    )
+    tasks, memory = _plan(tiny_data)
+    run = run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
     assert run["diagnostics"] is False
 
 
-def test_lean_run_does_not_ask_the_trainer_for_group_statistics(tiny_data, monkeypatch):
+class _CountingNumpy:
+    """Stand-in for the ``np`` of the experiment module that counts ``concatenate``."""
+
+    def __init__(self):
+        self.concatenations = 0
+
+    def __getattr__(self, name):
+        return getattr(np, name)
+
+    def concatenate(self, *args, **kwargs):
+        self.concatenations += 1
+        return np.concatenate(*args, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "extra, stacks",
+    [
+        ({}, False),  # the stacked training set is not needed
+        ({"diagnostics": True}, True),  # the loss passes read it
+        ({"feature_power": 1.0}, True),  # the feature rescaling reads it
+    ],
+)
+def test_the_stacked_training_set_is_built_only_when_something_reads_it(
+    tiny_data, monkeypatch, extra, stacks
+):
+    from polynomial_cl.continual import experiment as module
+
+    counting = _CountingNumpy()
+    monkeypatch.setattr(module, "np", counting)
+    tasks, memory = _plan(tiny_data)
+    run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS, **extra)
+    assert (counting.concatenations > 0) == stacks
+
+
+def test_the_default_run_does_not_ask_the_trainer_for_group_statistics(
+    tiny_data, monkeypatch
+):
     from polynomial_cl.continual import experiment as module
 
     seen = []
@@ -261,38 +371,157 @@ def test_lean_run_does_not_ask_the_trainer_for_group_statistics(tiny_data, monke
         return real(*args, **kwargs)
 
     monkeypatch.setattr(module, "fit_task", spy)
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
-    run_condition(
-        "expanding", tiny_data, tasks, memory, seed=3, diagnostics=False, **KWARGS
-    )
+    tasks, memory = _plan(tiny_data)
+    run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
     assert seen and all(g is None for g in seen)
     seen.clear()
-    run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
+    run_condition(
+        "expanding", tiny_data, tasks, memory, seed=3, diagnostics=True, **KWARGS
+    )
     assert seen and all(g is not None for g in seen)
 
 
-def test_comparison_summary_is_identical_in_lean_mode(tiny_data):
-    kwargs = {
-        "epochs": 1,
-        "learning_rate": 0.05,
-        "batch_size": 8,
-        "memory_per_class": 2,
+def test_diagnostics_can_be_enabled_through_every_comparison_function(tiny_data):
+    kwargs = {"epochs": 1, "learning_rate": 0.05, "batch_size": 8}
+    conditions = continual.run_comparison(
+        tiny_data, [0], memory_per_class=2, diagnostics=True, **kwargs
+    )
+    strategies = continual.run_strategy_comparison(
+        tiny_data, [0], memory_per_class=2, diagnostics=True, **kwargs
+    )
+    assert all(r["diagnostics"] is True for r in conditions["runs"])
+    assert all(r["diagnostics"] is True for r in strategies["runs"])
+    sampling = continual.run_sampling_comparison(
+        tiny_data, [0], strategies=("ordinary",), memory_per_class=2, **kwargs
+    )
+    assert all(r["diagnostics"] is False for p in sampling.values() for r in p["runs"])
+
+
+def test_comparison_summary_is_identical_with_and_without_diagnostics(tiny_data):
+    kwargs = {"epochs": 1, "learning_rate": 0.05, "batch_size": 8}
+    kwargs["memory_per_class"] = 2
+    default = run_comparison(tiny_data, [0, 1], **kwargs)
+    observed = run_comparison(tiny_data, [0, 1], diagnostics=True, **kwargs)
+    assert observed["summary"] == default["summary"]
+    assert all(r["diagnostics"] is False for r in default["runs"])
+
+
+def test_strategy_summary_covers_the_diagnostic_metrics_only_when_recorded(tiny_data):
+    from polynomial_cl.continual.experiment import STRATEGY_METRICS, SUMMARY_METRICS
+
+    kwargs = {"epochs": 1, "learning_rate": 0.05, "batch_size": 8}
+    kwargs["memory_per_class"] = 2
+    default = continual.run_strategy_comparison(tiny_data, [0, 1], **kwargs)
+    observed = continual.run_strategy_comparison(
+        tiny_data, [0, 1], diagnostics=True, **kwargs
+    )
+    for stats in default["summary"].values():
+        assert tuple(stats) == SUMMARY_METRICS  # no NaN-filled diagnostic columns
+    for stats in observed["summary"].values():
+        assert tuple(stats) == STRATEGY_METRICS
+    for name, stats in default["summary"].items():
+        for metric in SUMMARY_METRICS:
+            assert observed["summary"][name][metric] == stats[metric]
+
+
+# ------------------------------------------------------------------ degree studies
+STUDY = {
+    "strategies": ("ordinary",),
+    "samplings": ("shuffled",),
+    "epochs": 1,
+    "batch_size": 8,
+    "memory_per_class": 2,
+    "n_ref_per_class": 1,
+}
+
+
+@pytest.fixture(scope="module")
+def studies(tiny_data):
+    run = continual.run_per_degree_study
+    return (
+        run(tiny_data, tiny_data, [0], [1, 2], **STUDY),
+        run(tiny_data, tiny_data, [0], [1, 2], diagnostics=True, **STUDY),
+    )
+
+
+def test_a_study_selects_and_reports_the_same_with_and_without_diagnostics(studies):
+    default, observed = studies
+    (a,), (b,) = default["cells"], observed["cells"]
+    selection = ("vectors", "validation_metrics", "validation_scores", "pareto")
+    for key in (*selection, "selected", "base_rate", "shared_grid"):
+        assert a[key] == b[key], key
+    for name in a["runs"]:
+        for lean, full in zip(a["runs"][name], b["runs"][name]):
+            for field in LEARNING_FIELDS:
+                assert lean[field] == full[field], (name, field)
+
+
+def test_study_runs_record_diagnostics_only_when_asked(studies):
+    default, observed = studies
+    for study, expected in ((default, False), (observed, True)):
+        runs = [r for c in study["cells"] for rs in c["runs"].values() for r in rs]
+        assert runs and all(r["diagnostics"] is expected for r in runs)
+
+
+def test_study_tables_work_for_both_kinds_of_run(studies):
+    default, observed = studies
+    lean_rows, full_rows = study_rows(default), study_rows(observed)
+    assert lean_rows and "takeover" not in lean_rows[0] and "flips" not in lean_rows[0]
+    assert "takeover" in full_rows[0] and "flips" in full_rows[0]
+    for lean, full in zip(lean_rows, full_rows):  # shared columns agree
+        assert {k: full[k] for k in lean} == lean
+
+
+def test_vector_summary_follows_what_the_runs_recorded(studies):
+    from polynomial_cl.continual.degree_study import TRADEOFF_METRICS
+    from polynomial_cl.continual.experiment import SUMMARY_METRICS
+
+    default, observed = studies
+    lean_runs = default["cells"][0]["runs"]["shared"]
+    full_runs = observed["cells"][0]["runs"]["shared"]
+    assert set(vector_summary(lean_runs)) == set(SUMMARY_METRICS)
+    assert set(vector_summary(full_runs)) == set(TRADEOFF_METRICS)
+
+
+def test_epoch_robustness_passes_diagnostics_through(tiny_data, studies):
+    default, _ = studies
+    settings = {
+        "batch_size": STUDY["batch_size"],
+        "memory_per_class": STUDY["memory_per_class"],
+        "n_ref_per_class": STUDY["n_ref_per_class"],
     }
-    full = run_comparison(tiny_data, [0, 1], **kwargs)
-    lean = run_comparison(tiny_data, [0, 1], diagnostics=False, **kwargs)
-    assert lean["summary"] == full["summary"]
-    assert all(r["diagnostics"] is False for r in lean["runs"])
+    for flag in (False, True):
+        again = continual.run_epoch_robustness(
+            tiny_data, default, 1, test_seeds=[1], diagnostics=flag, **settings
+        )
+        runs = [r for c in again["cells"] for rs in c["runs"].values() for r in rs]
+        assert runs and all(r["diagnostics"] is flag for r in runs)
 
 
 # ------------------------------------------------------------------ timings
-def test_timings_split_the_run_and_do_not_change_the_record(tiny_data):
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
+def test_timings_are_not_part_of_a_record_unless_requested(tiny_data):
+    tasks, memory = _plan(tiny_data)
+    record = run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
+    assert not [k for k in record if "second" in k or "timing" in k]
     timings = {}
     timed = run_condition(
         "expanding", tiny_data, tasks, memory, seed=3, timings=timings, **KWARGS
     )
-    assert timed == run_condition(
-        "expanding", tiny_data, tasks, memory, seed=3, **KWARGS
+    assert timed == record  # asking for timings leaves the record untouched
+
+
+def test_timings_split_the_run(tiny_data):
+    tasks, memory = _plan(tiny_data)
+    timings = {}
+    run_condition(
+        "expanding",
+        tiny_data,
+        tasks,
+        memory,
+        seed=3,
+        diagnostics=True,
+        timings=timings,
+        **KWARGS,
     )
     expected = {
         "training_seconds",
@@ -308,47 +537,78 @@ def test_timings_split_the_run_and_do_not_change_the_record(tiny_data):
     assert parts == pytest.approx(timings["total_seconds"])
 
 
-def test_lean_timings_report_exactly_zero_diagnostics(tiny_data):
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
+def test_timings_attribute_time_to_the_operation_they_name(tiny_data, monkeypatch):
+    # Slow down one operation at a time: only its own bucket may take the delay.
+    import time
+
+    from polynomial_cl.continual import experiment as module
+
+    delay = 0.05
+
+    def slowed(name):
+        real = getattr(module, name)
+
+        def wrapper(*args, **kwargs):
+            time.sleep(delay)
+            return real(*args, **kwargs)
+
+        return wrapper
+
+    tasks, memory = _plan(tiny_data)
+    for name, bucket in (
+        ("fit_task", "training_seconds"),
+        ("accuracy_by_task", "evaluation_seconds"),
+        ("_record_indicators", "diagnostics_seconds"),
+    ):
+        monkeypatch.setattr(module, name, slowed(name))
+        timings = {}
+        run_condition(
+            "expanding",
+            tiny_data,
+            tasks,
+            memory,
+            seed=3,
+            diagnostics=True,
+            timings=timings,
+            **KWARGS,
+        )
+        monkeypatch.undo()
+        assert timings[bucket] >= 5 * delay * 0.9, (name, timings)
+        others = {"training_seconds", "evaluation_seconds", "diagnostics_seconds"}
+        for other in others - {bucket}:
+            assert timings[other] < 5 * delay * 0.9, (name, other, timings)
+
+
+def test_the_default_run_reports_exactly_zero_diagnostics_time(tiny_data):
+    tasks, memory = _plan(tiny_data)
     timings = {}
     run_condition(
-        "expanding",
-        tiny_data,
-        tasks,
-        memory,
-        seed=3,
-        diagnostics=False,
-        timings=timings,
-        **KWARGS,
+        "expanding", tiny_data, tasks, memory, seed=3, timings=timings, **KWARGS
     )
     assert timings["diagnostics_seconds"] == 0.0
     assert timings["training_seconds"] > 0 and timings["evaluation_seconds"] > 0
 
 
-# ------------------------------------------------------------------ helpers refuse lean runs
-def test_diagnostic_helpers_explain_why_a_lean_run_cannot_be_used(tiny_data):
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
-    lean = run_condition(
-        "expanding", tiny_data, tasks, memory, seed=3, diagnostics=False, **KWARGS
-    )
+# ------------------------------------------------------------------ helpers refuse runs without diagnostics
+def test_diagnostic_helpers_explain_why_a_default_run_cannot_be_used(tiny_data):
+    tasks, memory = _plan(tiny_data)
+    default = run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
     for helper in (old_class_rows, strategy_diagnostic_rows, degree_group_rows):
-        with pytest.raises(ValueError, match="diagnostics=False"):
-            helper(lean)
+        with pytest.raises(ValueError, match="diagnostics=True"):
+            helper(default)
     with pytest.raises(ValueError, match="my_report needs"):
-        require_diagnostics(lean, "my_report")
+        require_diagnostics(default, "my_report")
 
 
-def test_plots_of_diagnostics_refuse_a_lean_run(tiny_data):
+def test_plots_of_diagnostics_refuse_a_default_run(tiny_data):
     matplotlib = pytest.importorskip("matplotlib")
     matplotlib.use("Agg")
     from polynomial_cl.plotting.continual import plot_cil_takeover_flips
 
-    tasks, memory = make_task_plan(tiny_data.train_y, 3, 2)
-    lean = run_condition(
-        "expanding", tiny_data, tasks, memory, seed=3, diagnostics=False, **KWARGS
-    )
-    with pytest.raises(ValueError, match="diagnostics=False"):
-        plot_cil_takeover_flips({"lean": [lean]})
+    tasks, memory = _plan(tiny_data)
+    default = run_condition("expanding", tiny_data, tasks, memory, seed=3, **KWARGS)
+    with pytest.raises(ValueError, match="diagnostics=True"):
+        plot_cil_takeover_flips({"default": [default]})
 
 
 def test_records_written_before_the_flag_existed_count_as_full_records():
@@ -356,42 +616,117 @@ def test_records_written_before_the_flag_existed_count_as_full_records():
 
 
 # ------------------------------------------------------------------ command line
-def _run_cli(*args, check=True):
-    return subprocess.run(
-        [
-            sys.executable,
-            str(ROOT / "experiments" / "class_incremental.py"),
-            *map(str, args),
-        ],
-        capture_output=True,
-        text=True,
-        check=check,
-    )
-
-
 COMMON = [
     "--dataset", "synthetic_2d", "--seeds", 0, "--epochs", 1,
     "--memory-per-class", 2, "--train-per-class", 6, "--test-per-class", 4,
 ]  # fmt: skip
 
 
-def test_cli_no_diagnostics_gives_the_same_summary_with_lean_runs(tmp_path):
-    full_out, lean_out = tmp_path / "full.json", tmp_path / "lean.json"
-    _run_cli(*COMMON, "--output", full_out)
-    _run_cli(*COMMON, "--output", lean_out, "--no-diagnostics")
-    full, lean = (json.loads(p.read_text()) for p in (full_out, lean_out))
-    assert lean["summary"] == full["summary"]
+def _read(path):
+    return json.loads(path.read_text())
+
+
+@pytest.mark.parametrize("experiment", ["conditions", "strategies"])
+def test_cli_is_lean_by_default_and_observes_only_with_the_flag(tmp_path, experiment):
+    default, observed = tmp_path / "default.json", tmp_path / "observed.json"
+    run_script(
+        "class_incremental.py", *COMMON, "--experiment", experiment,
+        "--output", default,
+    )  # fmt: skip
+    run_script(
+        "class_incremental.py", *COMMON, "--experiment", experiment,
+        "--diagnostics", "--output", observed,
+    )  # fmt: skip
+    lean, full = _read(default), _read(observed)
+    assert lean["protocol"]["diagnostics"] is False
+    assert full["protocol"]["diagnostics"] is True
     assert all(r["diagnostics"] is False for r in lean["runs"])
     assert all(r["diagnostics"] is True for r in full["runs"])
+    assert not any(OBSERVATION_FIELDS & set(r) for r in lean["runs"])
+    assert all(OBSERVATION_FIELDS <= set(r) for r in full["runs"])
+    for lean_run, full_run in zip(lean["runs"], full["runs"]):
+        for field in LEARNING_FIELDS:
+            assert lean_run[field] == full_run[field], field
 
 
-def test_cli_rejects_no_diagnostics_for_the_strategy_study(tmp_path):
-    result = _run_cli(
-        *COMMON,
-        "--experiment", "strategies",
-        "--no-diagnostics",
-        "--output", tmp_path / "x.json",
-        check=False,
+def test_cli_summary_of_the_conditions_does_not_depend_on_the_flag(tmp_path):
+    default, observed = tmp_path / "default.json", tmp_path / "observed.json"
+    run_script("class_incremental.py", *COMMON, "--output", default)
+    run_script("class_incremental.py", *COMMON, "--diagnostics", "--output", observed)
+    assert _read(default)["summary"] == _read(observed)["summary"]
+
+
+def test_cli_strategy_summary_has_the_diagnostic_metrics_only_with_the_flag(tmp_path):
+    from polynomial_cl.continual.experiment import STRATEGY_METRICS, SUMMARY_METRICS
+
+    default, observed = tmp_path / "default.json", tmp_path / "observed.json"
+    args = (*COMMON, "--experiment", "strategies")
+    run_script("class_incremental.py", *args, "--output", default)
+    run_script("class_incremental.py", *args, "--diagnostics", "--output", observed)
+    for stats in _read(default)["summary"].values():
+        assert tuple(stats) == SUMMARY_METRICS
+    for stats in _read(observed)["summary"].values():
+        assert tuple(stats) == STRATEGY_METRICS
+
+
+def test_the_old_negative_flag_no_longer_exists(tmp_path):
+    result = run_script(
+        "class_incremental.py", *COMMON, "--no-diagnostics",
+        "--output", tmp_path / "x.json", check=False,
     )  # fmt: skip
-    assert result.returncode != 0
-    assert "--no-diagnostics applies to --experiment conditions only" in result.stderr
+    assert result.returncode == 2 and "unrecognized arguments" in result.stderr
+
+
+STUDY_ARGS = (
+    "--dataset", "synthetic_2d", "--train-per-class", 12, "--test-per-class", 6,
+    "--memory-per-class", 4, "--n-ref-per-class", 1, "--batch-size", 16,
+    "--strategies", "ordinary", "--samplings", "shuffled",
+    "--validation-fraction", 0.5, "--epochs", 1,
+)  # fmt: skip
+
+
+def _study_runs(study):
+    return [r for c in study["cells"] for rs in c["runs"].values() for r in rs]
+
+
+def test_per_degree_cli_is_lean_by_default_and_observes_only_with_the_flag(tmp_path):
+    default, observed = tmp_path / "default.json", tmp_path / "observed.json"
+    args = (*STUDY_ARGS, "--experiment", "per-degree", "--select-seeds", 0)
+    args += ("--test-seeds", 1)
+    run_script("per_degree_lr.py", *args, "--output", default)
+    run_script("per_degree_lr.py", *args, "--diagnostics", "--output", observed)
+    lean, full = _read(default), _read(observed)
+    assert lean["protocol"]["diagnostics"] is False
+    assert full["protocol"]["diagnostics"] is True
+    assert all(r["diagnostics"] is False for r in _study_runs(lean))
+    assert all(r["diagnostics"] is True for r in _study_runs(full))
+    assert lean["cells"][0]["selected"] == full["cells"][0]["selected"]
+
+
+def test_per_degree_cli_passes_the_flag_to_the_epoch_and_sampling_experiments(tmp_path):
+    cells = tmp_path / "cells"
+    cells.mkdir()
+    run_script(
+        "per_degree_lr.py", *STUDY_ARGS, "--experiment", "per-degree",
+        "--select-seeds", 0, "--test-seeds", 1, "--output", cells / "cell_a.json",
+    )  # fmt: skip
+    for flag in ((), ("--diagnostics",)):
+        for experiment in ("epochs", "sampling"):
+            out = tmp_path / f"{experiment}{len(flag)}.json"
+            extra = ("--cells-dir", cells) if experiment == "epochs" else ("--seeds", 0)
+            run_script(
+                "per_degree_lr.py", *STUDY_ARGS, "--experiment", experiment,
+                *extra, *flag, "--output", out,
+            )  # fmt: skip
+            payload = _read(out)
+            runs = (
+                _study_runs(payload)
+                if experiment == "epochs"
+                else [
+                    r
+                    for p in payload.values()
+                    if isinstance(p, dict) and "runs" in p
+                    for r in p["runs"]
+                ]
+            )
+            assert runs and all(r["diagnostics"] is bool(flag) for r in runs)

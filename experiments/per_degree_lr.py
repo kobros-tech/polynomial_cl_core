@@ -19,7 +19,7 @@ import argparse
 import json
 from pathlib import Path
 
-from common import add_dataset_arguments, load_dataset
+from common import add_dataset_arguments, add_diagnostics_argument, load_dataset
 
 from polynomial_cl.continual import (
     holdout_split,
@@ -79,6 +79,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     p.add_argument("--memory-per-class", type=int, default=MEMORY_PER_CLASS)
     p.add_argument("--n-ref-per-class", type=int, default=N_REF_PER_CLASS)
+    add_diagnostics_argument(p)
     args = p.parse_args()
     if min(args.epochs, args.batch_size, args.memory_per_class) < 1:
         p.error("epochs, batch-size and memory-per-class must be positive")
@@ -92,6 +93,7 @@ def main():
         "batch_size": args.batch_size,
         "memory_per_class": args.memory_per_class,
         "n_ref_per_class": args.n_ref_per_class,
+        "diagnostics": args.diagnostics,
     }
 
     def log(message):
@@ -122,6 +124,7 @@ def main():
             n_ref_per_class=args.n_ref_per_class,
             strategies=args.strategies,
             samplings=args.samplings,
+            diagnostics=args.diagnostics,
             log=log,
         )
     else:

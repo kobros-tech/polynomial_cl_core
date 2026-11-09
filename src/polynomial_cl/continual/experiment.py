@@ -178,24 +178,32 @@ INDICATORS = (
 
 
 def require_diagnostics(run, what="this"):
-    """Raise a clear error if ``run`` was produced with ``diagnostics=False``.
+    """Raise a clear error if ``run`` was made without diagnostics (the default).
 
     Records written before the ``diagnostics`` key existed are full records.
     """
     if not run.get("diagnostics", True):
         raise ValueError(
-            f"{what} needs the diagnostics of a run, but this run was made with "
-            "diagnostics=False (the lean benchmark mode); re-run with diagnostics=True"
+            f"{what} needs the diagnostics of a run, but this run was made without "
+            "them (diagnostics=False, the default); re-run with diagnostics=True"
         )
 
 
-def _mean_after_first(values):
-    """Mean over experiences 2..5 (experience 1 has no old function to preserve).
+def recorded_metrics(runs, metrics):
+    """The ``metrics`` every run in ``runs`` actually recorded.
 
-    ``None`` when the run recorded no indicators (``diagnostics=False``).
+    A run made without diagnostics has no diagnostic metrics (they are absent from its record,
+    not ``None``), so for such runs only the ``SUMMARY_METRICS`` among ``metrics`` are
+    returned. Summaries use this to stay valid for both kinds of run.
     """
-    present = [v for v in values[1:] if v is not None]
-    return float(np.mean(present)) if present else None
+    if all(run.get("diagnostics", True) for run in runs):
+        return metrics
+    return tuple(dict.fromkeys(m for m in metrics if m in SUMMARY_METRICS))
+
+
+def _mean_after_first(values):
+    """Mean over experiences 2..5 (experience 1 has no old function to preserve)."""
+    return float(np.mean([v for v in values[1:] if v is not None]))
 
 
 def _record_indicators(
@@ -351,29 +359,33 @@ def run_condition(
     n_ref_per_class=N_REF_PER_CLASS,
     feature_power=0.0,
     sampling=DEFAULT_SAMPLING,
-    diagnostics=True,
+    diagnostics=False,
     timings=None,
 ):
     """Run one condition; returns a JSON-serialisable record with the accuracy matrix.
 
     ``strategy`` selects the update rule (see ``STRATEGIES``); the default is plain training with
-    replay. Besides accuracy, every record carries indicators of whether the model is learning
-    (loss before/after, size of the update, trainable coefficients) and how much the old
-    function moved (change of old-class logits on old-class test inputs).
+    replay. With ``diagnostics=True`` the record also carries indicators of whether the model
+    is learning (loss before/after, size of the update, trainable coefficients) and how much
+    the old function moved (change of old-class logits on old-class test inputs).
 
     ``feature_power`` p > 0 gives every feature its own step size
     ``learning_rate * (max_rms / rms_i) ** p`` (rms of feature i on the experience's training
     set): p = 0 is one shared rate, p = 1 diagonal preconditioning.
 
-    ``diagnostics=False`` is the lean benchmark mode: it skips everything that only *observes*
-    the run (the two full training-set loss passes, the per-degree-group statistics, the
-    old-class logit/flip/take-over indicators and the null-space rank bookkeeping) and
-    records ``None`` for those fields, including ``mean_old_logit_change``,
-    ``mean_old_flip_fraction``, ``mean_old_takeover_fraction`` and ``mean_loss_reduction``.
-    Nothing that influences learning is skipped: the task plan, replay, sampling, update
-    rule, number of updates and the evaluation after every experience are untouched, so the
-    accuracy matrix, forgetting and sampling accounting are bit-for-bit those of a
-    ``diagnostics=True`` run. The record carries ``"diagnostics": False``.
+    ``diagnostics`` is off by default: a run then does only the work that learning and the
+    accuracy matrix need. ``diagnostics=True`` additionally observes the run: the two full
+    training-set loss passes, the per-degree-group statistics, the old-class logit, flip and
+    take-over indicators and the null-space rank bookkeeping. Observation never feeds back:
+    the task plan, replay, sampling, update rule, number of updates and the evaluation after
+    every experience are the same either way, so the accuracy matrix, forgetting and sampling
+    accounting are bit-for-bit identical.
+
+    The record carries ``"diagnostics": <bool>``. The observation fields
+    (``degree_diagnostics``, every entry of ``INDICATORS``, ``mean_old_logit_change``,
+    ``mean_old_flip_fraction``, ``mean_old_takeover_fraction`` and ``mean_loss_reduction``)
+    are present only when ``diagnostics=True``: a field that was not measured is absent, so
+    reading it fails loudly instead of yielding ``None``.
 
     ``timings`` (an optional dict, filled in place so the returned record stays
     deterministic) receives the wall-clock seconds of this call split into
@@ -431,12 +443,15 @@ def run_condition(
             replay = stored_indices(memory_indices, old_classes)
         else:
             replay = np.empty(0, dtype=np.int64)
-        train_x = np.concatenate(
-            [data.train_x[indices, :count], data.train_x[replay, :count]]
-        )
-        train_y = data.train_y[np.concatenate([indices, replay])].astype(
-            np.int64, copy=False
-        )
+        # The stacked training set is read only by the feature rescaling and by the
+        # diagnostics' loss passes; fit_task takes the current and replay parts separately.
+        if diagnostics or feature_power:
+            train_x = np.concatenate(
+                [data.train_x[indices, :count], data.train_x[replay, :count]]
+            )
+            train_y = data.train_y[np.concatenate([indices, replay])].astype(
+                np.int64, copy=False
+            )
         feature_scale = None
         if feature_power:
             rms = np.sqrt(np.mean(train_x.astype(np.float64) ** 2, axis=0))
@@ -467,10 +482,9 @@ def run_condition(
             step_scale=step_scale,
         )
         scale, null_basis, refs, null_groups = restrictions
-        old_test = np.flatnonzero(data.test_y < old_classes)
-        before = loss_before = None
         if diagnostics:
             mark = time.perf_counter()
+            old_test = np.flatnonzero(data.test_y < old_classes)
             before = weights.copy()
             loss_before = cross_entropy(weights, train_x, train_y, n_seen)
             spent["diagnostics"] += time.perf_counter() - mark
@@ -497,17 +511,19 @@ def run_condition(
             stats=fit_stats,
         )
         spent["training"] += time.perf_counter() - mark
-        mark = time.perf_counter()
-        effective = (
-            rate_vector
-            if per_degree
-            else np.full(N_DEGREE_GROUPS, float(learning_rate))
-        )
-        if feature_scale is not None:  # report the mean step size of each group
-            sums = np.bincount(group_index, feature_scale, N_DEGREE_GROUPS)
-            sizes = np.maximum(np.bincount(group_index, minlength=N_DEGREE_GROUPS), 1)
-            effective = effective * sums / sizes
         if diagnostics:
+            mark = time.perf_counter()
+            effective = (
+                rate_vector
+                if per_degree
+                else np.full(N_DEGREE_GROUPS, float(learning_rate))
+            )
+            if feature_scale is not None:  # report the mean step size of each group
+                sums = np.bincount(group_index, feature_scale, N_DEGREE_GROUPS)
+                sizes = np.maximum(
+                    np.bincount(group_index, minlength=N_DEGREE_GROUPS), 1
+                )
+                effective = effective * sums / sizes
             diag = _degree_diagnostics(
                 weights,
                 before,
@@ -520,11 +536,8 @@ def run_condition(
                 scale,
                 fit_stats,
             )
-        else:
-            diag = {k: [None] * N_DEGREE_GROUPS for k in DEGREE_DIAGNOSTICS}
-        for key in DEGREE_DIAGNOSTICS:
-            degree_diag[key].append(diag[key])
-        if diagnostics:
+            for key in DEGREE_DIAGNOSTICS:
+                degree_diag[key].append(diag[key])
             spent["diagnostics"] += time.perf_counter() - mark
         sampling_log.append(
             {"policy": sampling}
@@ -559,9 +572,6 @@ def run_condition(
                 null_groups=null_groups,
             )
             spent["diagnostics"] += time.perf_counter() - mark
-        else:
-            for key in INDICATORS:
-                indicators[key].append(None)
         mark = time.perf_counter()
         matrix[task, : task + 1] = accuracy_by_task(
             weights,
@@ -585,6 +595,24 @@ def run_condition(
     # Forgetting of an experience: best accuracy it ever had minus its final accuracy
     # (shared definition from polynomial_cl.metrics; the lower triangle has no NaN).
     forgetting = [float(v) for v in forgetting_from_matrix(matrix, n_tasks - 1)]
+    observed_degree, observed = {}, {}
+    if diagnostics:
+        observed_degree = {"degree_diagnostics": degree_diag}
+        observed = {
+            **indicators,
+            "mean_old_logit_change": _mean_after_first(
+                indicators["old_logit_change_by_task"]
+            ),
+            "mean_old_flip_fraction": _mean_after_first(
+                indicators["old_flip_fraction_by_task"]
+            ),
+            "mean_old_takeover_fraction": _mean_after_first(
+                indicators["old_takeover_fraction_by_task"]
+            ),
+            "mean_loss_reduction": float(
+                np.mean([b - a for b, a in indicators["train_loss_by_task"]])
+            ),
+        }
     return {
         "condition": condition,
         "strategy": strategy,
@@ -609,7 +637,7 @@ def run_condition(
         "per_degree_rates": bool(per_degree),
         "sampling": sampling,
         "sampling_by_task": sampling_log,
-        "degree_diagnostics": degree_diag,
+        **observed_degree,
         "current_accuracy_by_task": [float(matrix[t, t]) for t in range(n_tasks)],
         "mean_old_accuracy_by_task": [None]
         + [float(np.mean(matrix[t, :t])) for t in range(1, n_tasks)],
@@ -618,23 +646,7 @@ def run_condition(
         ],
         # The last experience has no later evaluation, so it is excluded from the mean.
         "mean_forgetting": float(np.mean(forgetting[:-1])),
-        **indicators,
-        "mean_old_logit_change": _mean_after_first(
-            indicators["old_logit_change_by_task"]
-        ),
-        "mean_old_flip_fraction": _mean_after_first(
-            indicators["old_flip_fraction_by_task"]
-        ),
-        "mean_old_takeover_fraction": _mean_after_first(
-            indicators["old_takeover_fraction_by_task"]
-        ),
-        "mean_loss_reduction": float(
-            np.mean(
-                [before - after for before, after in indicators["train_loss_by_task"]]
-            )
-        )
-        if diagnostics
-        else None,
+        **observed,
     }
 
 
@@ -653,13 +665,13 @@ def run_comparison(
     memory_per_class=MEMORY_PER_CLASS,
     feature_power=0.0,
     sampling=DEFAULT_SAMPLING,
-    diagnostics=True,
+    diagnostics=False,
 ):
     """Run all three conditions for every seed; within a seed they share task order and replay.
 
     ``data`` comes from ``make_feature_data`` (computed once, reusable across calls).
-    ``diagnostics=False`` runs every condition in the lean mode of ``run_condition``: same
-    accuracy, forgetting and summary, without the observation-only indicators.
+    ``diagnostics`` is passed to every ``run_condition`` (off by default); the summary covers
+    accuracy and forgetting either way.
     """
     if not len(seeds):
         raise ValueError("at least one seed is required")
@@ -697,8 +709,13 @@ def run_strategy_comparison(
     n_ref_per_class=N_REF_PER_CLASS,
     feature_power=0.0,
     sampling=DEFAULT_SAMPLING,
+    diagnostics=False,
 ):
-    """Compare update rules on the ``expanding`` schedule; same task order and replay per seed."""
+    """Compare update rules on the ``expanding`` schedule; same task order and replay per seed.
+
+    ``diagnostics`` is passed to every ``run_condition`` (off by default). The summary adds the
+    diagnostic metrics of ``STRATEGY_METRICS`` only when the runs recorded them.
+    """
     if not len(seeds):
         raise ValueError("at least one seed is required")
     runs = []
@@ -719,11 +736,14 @@ def run_strategy_comparison(
                     n_ref_per_class=n_ref_per_class,
                     feature_power=feature_power,
                     sampling=sampling,
+                    diagnostics=diagnostics,
                 )
             )
     return {
         "runs": runs,
-        "summary": mean_std_by_condition(runs, STRATEGY_METRICS, key="strategy"),
+        "summary": mean_std_by_condition(
+            runs, recorded_metrics(runs, STRATEGY_METRICS), key="strategy"
+        ),
     }
 
 

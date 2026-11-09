@@ -1,4 +1,4 @@
-# polynomial-cl-demo
+# polynomial_cl_core
 
 A small NumPy-only research instrument for one hypothesis:
 
@@ -52,7 +52,7 @@ Binary learning and class-incremental learning are different tasks, but they sha
 Only Python, NumPy, Matplotlib and Jupyter are used (no PyTorch / TensorFlow / scikit-learn / pretrained models). CPU only.
 
 ```bash
-cd polynomial-cl-demo
+cd polynomial_cl_core
 python -m venv .venv && source .venv/bin/activate     # optional
 pip install -e ".[dev]"                                # numpy, matplotlib + pytest, jupyter, nbformat, nbconvert
 python -m pytest                                       # fast test suite (seconds)
@@ -90,20 +90,28 @@ python experiments/class_incremental.py --dataset split_mnist  --output results/
 python experiments/class_incremental.py --dataset split_mnist --sampling shuffled --output results/split_mnist_shuffled.json   # the earlier (shuffled) protocol
 ```
 
-### Cost of a run: lean mode and timings
+### Cost of a run: diagnostics are opt-in, and timings
 
-A class-incremental run does two kinds of work. The _learning_ work is the task plan, replay, mini-batch updates and the accuracy matrix after every experience. The _observing_ work only measures what happened: the two full training-set loss passes per experience, the per-degree-group statistics (`degree_diagnostics`), the old-class logit, flip and takeover indicators, and the null-space rank bookkeeping. On Split MNIST the observing work is roughly half of a run's time, so benchmark code that only needs accuracy and forgetting can switch it off:
+A class-incremental run does two kinds of work. The _learning_ work is the task plan, replay, mini-batch updates and the accuracy matrix after every experience. The _observing_ work only measures what happened: the two full training-set loss passes per experience, the per-degree-group statistics (`degree_diagnostics`), the old-class logit, flip and takeover indicators, and the null-space rank bookkeeping. On Split MNIST the observing work is roughly half of a run's time, so it is **off by default** everywhere and has to be asked for:
 
 ```python
-run = run_condition("expanding", data, tasks, memory, seed=0, diagnostics=False)  # lean
-run = run_comparison(data, seeds, diagnostics=False)  # same for all three conditions
+run = run_condition(
+    "expanding", data, tasks, memory, seed=0
+)  # accuracy and forgetting only
+run = run_condition(
+    "expanding", data, tasks, memory, seed=0, diagnostics=True
+)  # also the observation
+run = run_comparison(data, seeds, diagnostics=True)  # the same for all three conditions
 ```
 
 ```bash
-python experiments/class_incremental.py --dataset split_mnist --no-diagnostics --output results/lean.json   # --experiment conditions only
+python experiments/class_incremental.py --dataset split_mnist --output results/split_mnist.json
+python experiments/class_incremental.py --dataset split_mnist --diagnostics --output results/split_mnist_diagnostics.json
 ```
 
-`diagnostics=False` skips only observation. The task plan, replay, sampling, update rule, number of updates and evaluation are untouched, so the accuracy matrix, per-class matrix, forgetting and `sampling_by_task` are bit-for-bit those of a default (`diagnostics=True`) run; `tests/test_lean_mode.py` checks this for every condition and update rule. The record keeps its schema and carries `"diagnostics": false`; every observing field (`train_loss_by_task`, `l1_update_by_task`, `degree_diagnostics`, `old_*_by_task`, `mean_old_*`, `mean_loss_reduction`, ...) is `None`. Helpers that need those fields (`old_class_rows`, `strategy_diagnostic_rows`, `degree_group_rows`, `plot_cil_takeover_flips`) raise a clear `ValueError` for a lean run, and `run_strategy_comparison` and the per-degree studies always run in full because they are diagnostics studies. The default stays `diagnostics=True`.
+The same `diagnostics=` argument exists on `run_strategy_comparison`, `run_sampling_comparison`, `run_per_degree_study` (passed on to every selection and test run), `select_rate_vectors`, `evaluate_vectors` and `run_epoch_robustness`, and the same `--diagnostics` flag on `class_incremental.py` and `per_degree_lr.py`. `rate_selection.py` reads only accuracy and forgetting, so it has no such flag. The flag is stored in each run (`"diagnostics"`) and in the protocol of a result file.
+
+`diagnostics=True` only observes. The task plan, replay, sampling, update rule, number of updates and evaluation are the same either way, so the accuracy matrix, per-class matrix, forgetting and `sampling_by_task` are bit-for-bit identical; `tests/test_lean_mode.py` checks this for every condition and update rule. A run without diagnostics also does none of the observation work, not even building the stacked training set that the loss passes read. The observation fields (`degree_diagnostics`, `train_loss_by_task`, `l1_update_by_task`, `n_trainable_by_task`, `null_dim_*`, `old_*_by_task`, `ref_logit_change_by_task`, `mean_old_logit_change`, `mean_old_flip_fraction`, `mean_old_takeover_fraction` and `mean_loss_reduction`) are **absent** from such a record rather than `None`, so reading one fails loudly instead of feeding a `NaN` into a summary. Summaries (`run_strategy_comparison`, `run_sampling_comparison`, `vector_summary`, `study_rows`) cover the diagnostic metrics only for runs that recorded them. The helpers that need diagnostics (`old_class_rows`, `strategy_diagnostic_rows`, `degree_group_rows`, `plot_cil_takeover_flips`, `mean_degree_diagnostic`) raise a clear `ValueError` for a run made without them. Records written before the flag existed count as full records.
 
 To see where time goes, pass a dict as `timings`; it is filled in place (the record itself stays deterministic):
 
@@ -118,7 +126,7 @@ The polynomial design matrix (969 columns for 16 variables at degree 3) is built
 
 ### Why old-class accuracy drops: takeover versus flips
 
-Two different mechanisms lower the accuracy on old classes, and the accuracy matrix alone cannot separate them. Every record carries both:
+Two different mechanisms lower the accuracy on old classes, and the accuracy matrix alone cannot separate them. A record made with diagnostics (`diagnostics=True`, `--diagnostics`) carries both:
 
 - `old_takeover_fraction_by_task`: after training, **all** classes seen so far compete (as in the accuracy matrix) and a **new** class wins an old-class test input. This can happen although the old logits barely move.
 - `old_flip_fraction_by_task`: only old classes compete, and the prediction changes between two old classes. This measures how much the old decision function itself moved.
@@ -130,11 +138,11 @@ Two different mechanisms lower the accuracy on old classes, and the accuracy mat
 `ordinary` (replay, everything trains), `ordinary_no_replay`, `frozen_old`, `small_old_lr` (old coefficients get 0.1 x the gradient) and `strategy_b` (every gradient is projected onto the null space of the design matrix at `--n-ref-per-class` stored inputs per old class, so the logits at those inputs cannot change). `strategy_b_new` is the binary `strategy_b_new`: old coefficients are frozen as in `frozen_old`, and the old classes' outputs may move only through newly added feature rows, inside the same null space; the new classes' columns use the full null space. A coefficient is _old_ if its feature row existed before the current experience **and** its class column was already introduced; new feature rows and the new classes' columns always train.
 
 ```bash
-python experiments/class_incremental.py --dataset split_mnist --experiment strategies --output results/split_mnist_strategies.json
-python experiments/class_incremental.py --dataset split_mnist --experiment strategies --n-ref-per-class 10 --output results/split_mnist_b10.json
+python experiments/class_incremental.py --dataset split_mnist --experiment strategies --diagnostics --output results/split_mnist_strategies.json
+python experiments/class_incremental.py --dataset split_mnist --experiment strategies --n-ref-per-class 10 --diagnostics --output results/split_mnist_b10.json
 ```
 
-Every record carries learning indicators that exist for _all_ rules: training loss before and after each experience, L1 size of the update, number of trainable coefficients, and the old-class change, flip and takeover diagnostics above. `null_dim` exists only for the two Strategy B variants and is a constraint diagnostic, not a general learning indicator. It is the free dimension for the old-class output columns (`strategy_b`: one basis shared by every column; `strategy_b_new`: the dimension left in the newly added feature rows, which is 0 in an experience that adds none), and `null_dim_new_class_columns` is the free dimension for the new classes' columns. `n_trainable` counts the directions that can actually move after the learning-rate vector is applied (zero-rate groups excluded).
+With diagnostics on, every record carries learning indicators that exist for _all_ rules: training loss before and after each experience, L1 size of the update, number of trainable coefficients, and the old-class change, flip and takeover diagnostics above. `null_dim` exists only for the two Strategy B variants and is a constraint diagnostic, not a general learning indicator. It is the free dimension for the old-class output columns (`strategy_b`: one basis shared by every column; `strategy_b_new`: the dimension left in the newly added feature rows, which is 0 in an experience that adds none), and `null_dim_new_class_columns` is the free dimension for the new classes' columns. `n_trainable` counts the directions that can actually move after the learning-rate vector is applied (zero-rate groups excluded).
 
 ### Per-feature learning rates and validated rate selection
 
@@ -263,7 +271,7 @@ Run the scripts as `python experiments/<name>.py` from the repository root. Reus
 - Shared and binary code: `test_features` (ordering, counts, the shared enumeration and zero-expansion helpers, output-level expansion invariance for binary and multiclass), `test_binary_features`, `test_binary_expansion` (exact copy, zeros, identical scores and probabilities on train/eval/random/outside inputs, invariant checked every step of the loop), `test_binary_training` (finite-difference gradient, loss decrease, reproducibility, frozen coefficients, zero-init learning, per-coefficient learning rates, preservation tests, preset-override guard), `test_binary_replay`, `test_binary_data`, `test_binary_plotting`.
 - Synthetic data: `test_synthetic_data` (sinusoidal experiences bit-identical to the pre-refactor generator, circular target geometry, reproducibility, independent train/test streams, label noise), `test_joint_studies`.
 - Class-incremental code: `test_class_incremental` and `test_mnist` (features, expansion invariant and its guard, masked evaluation, forgetting definition, per-class accuracy, takeover versus flip diagnostics, determinism, offline Split MNIST), `test_multiclass_model`, `test_multiclass_training`, `test_strategies` (the update restrictions of the six strategies), `test_class_incremental_plotting`, `test_reporting_rows`.
-- Execution efficiency: `test_lean_mode` (feature construction bit-identical to the direct formula and free of its large temporary array; `diagnostics=False` learns exactly what the full run learns for every condition and update rule, skips every observing helper, keeps the sampling accounting; timings; helpers refusing a lean run; the `--no-diagnostics` flag).
+- Execution efficiency: `test_lean_mode` (feature construction bit-identical to the previous formula, matching an independent float64 evaluation, correct at chunk boundaries and free of the large temporary array; diagnostics off by default in every function that takes them and opt-in on every command line; `diagnostics=True` learns exactly what the default run learns for every condition and update rule; a default run skips every observing helper and records none of its fields; summaries, study tables and the degree studies for both kinds of run; timings only on request and attributed to the operation they name; the helpers refusing a run without diagnostics) and `test_checkout` (the tests and the experiment scripts import this checkout, and a failing script shows what it printed).
 - Per-degree rates and sampling: `test_per_degree` (vector validation, per-group parameter updates, zero rates, masks, Strategy B, expansion, class counts, no future-class draws, reproducibility, accuracy/forgetting).
 - Replay and sampling: `test_replay_sampling` (memory draw and stored-index order, policy-to-sampler mapping, the trainer's injected sampler).
 - Structure: `test_architecture` (import graph without cycles, class-incremental code independent of the binary code, binary/model/trainer code independent of the class-incremental code, entry points not importing each other, no stale imports in source, tests, experiments and notebooks).

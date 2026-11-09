@@ -40,7 +40,7 @@ def fetch(root: Path, name: str) -> Path:
             path.unlink()
 
     request = urllib.request.Request(
-        BASE_URL + name, headers={"User-Agent": "polynomial-cl-demo/0.1"}
+        BASE_URL + name, headers={"User-Agent": "polynomial_cl_core/0.1"}
     )
     temporary = path.with_suffix(path.suffix + ".part")
     try:
