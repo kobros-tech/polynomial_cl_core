@@ -111,7 +111,7 @@ python experiments/class_incremental.py --dataset split_mnist --diagnostics --ou
 
 The same `diagnostics=` argument exists on `run_strategy_comparison`, `run_sampling_comparison`, `run_per_degree_study` (passed on to every selection and test run), `select_rate_vectors`, `evaluate_vectors` and `run_epoch_robustness`, and the same `--diagnostics` flag on `class_incremental.py` and `per_degree_lr.py`. `rate_selection.py` reads only accuracy and forgetting, so it has no such flag. The flag is stored in each run (`"diagnostics"`) and in the protocol of a result file.
 
-`diagnostics=True` only observes. The task plan, replay, sampling, update rule, number of updates and evaluation are the same either way, so the accuracy matrix, per-class matrix, forgetting and `sampling_by_task` are bit-for-bit identical; `tests/test_lean_mode.py` checks this for every condition and update rule. A run without diagnostics also does none of the observation work, not even building the stacked training set that the loss passes read. The observation fields (`degree_diagnostics`, `train_loss_by_task`, `l1_update_by_task`, `n_trainable_by_task`, `null_dim_*`, `old_*_by_task`, `ref_logit_change_by_task`, `mean_old_logit_change`, `mean_old_flip_fraction`, `mean_old_takeover_fraction` and `mean_loss_reduction`) are **absent** from such a record rather than `None`, so reading one fails loudly instead of feeding a `NaN` into a summary. Summaries (`run_strategy_comparison`, `run_sampling_comparison`, `vector_summary`, `study_rows`) cover the diagnostic metrics only for runs that recorded them. The helpers that need diagnostics (`old_class_rows`, `strategy_diagnostic_rows`, `degree_group_rows`, `plot_cil_takeover_flips`, `mean_degree_diagnostic`) raise a clear `ValueError` for a run made without them. Records written before the flag existed count as full records.
+`diagnostics=True` only observes. The task plan, replay, sampling, update rule, number of updates and evaluation are the same either way, so the accuracy matrix, per-class matrix, forgetting and `sampling_by_task` are bit-for-bit identical; `tests/test_lean_mode.py` checks this for every condition and update rule. A run without diagnostics also does none of the observation work, not even building the stacked training set that the loss passes read. The observation fields (`degree_diagnostics`, `reference_diagnostics_by_task`, `train_loss_by_task`, `l1_update_by_task`, `n_trainable_by_task`, `null_dim_*`, `old_*_by_task`, `ref_logit_change_by_task`, `mean_old_logit_change`, `mean_old_flip_fraction`, `mean_old_takeover_fraction` and `mean_loss_reduction`) are **absent** from such a record rather than `None`, so reading one fails loudly instead of feeding a `NaN` into a summary. Summaries (`run_strategy_comparison`, `run_sampling_comparison`, `vector_summary`, `study_rows`) cover the diagnostic metrics only for runs that recorded them. The helpers that need diagnostics (`old_class_rows`, `strategy_diagnostic_rows`, `degree_group_rows`, `plot_cil_takeover_flips`, `mean_degree_diagnostic`) raise a clear `ValueError` for a run made without them. Records written before the flag existed count as full records.
 
 To see where time goes, pass a dict as `timings`; it is filled in place (the record itself stays deterministic):
 
@@ -282,3 +282,59 @@ Run the scripts as `python experiments/<name>.py` from the repository root. Reus
 ## Reproducibility
 
 Everything is driven by explicit seeds (`np.random.default_rng([seed, experience, stream])` for the binary task; `default_rng(seed)` for task plans and `seed + experience` for training shuffles in the class-incremental runner). Re-running a notebook gives the same numbers. Generated experiment files go to `results/` (git-ignored); the tools need the package installed (`pip install -e .`).
+
+## Degree-control experiment
+
+### Mechanism
+
+`run_condition(..., degree_control_factors=[m0, m1, m2, m3])` multiplies the per-degree learning rates by factors in [0, 1]: the effective rate of degree `d` is `eta_d * m_d`, and 0 freezes that degree. The result is one rate per feature, `d_j = eta_deg(j) * m_deg(j)` (`degree_rates.diagonal_learning_rates`), applied to the diagonal step every strategy already uses; it is never materialised as a matrix. A feature that appears through expansion takes the rate of its own degree from its first update, and all factors equal to 1 reproduce the uncontrolled run bit for bit.
+
+Compatibility with `feature_power`: a control that changes anything (some factor below 1) cannot be combined with `feature_power > 0` and raises `ValueError`. An all-ones control is the identity, is treated as no control, and is accepted with `feature_power`. A per-degree rate _vector_ (`learning_rate=[...]`) is rejected together with `feature_power` whether or not a control is given.
+
+Strategy B computes its null-space projection for the controlled step, so what it preserves is the logits on its _selected reference examples_. That is not the same as retaining the old-data distribution: the old-class accuracy can still fall, and the experiment below measures it.
+
+Degree control is an experimental mechanism for controlling degree-wise plasticity. Nothing here shows that it improves retention; see the results and their limits below.
+
+### Candidate selection (`experiments/degree_control.py`, `polynomial_cl/continual/degree_control.py`)
+
+Per strategy (`ordinary`, `frozen_old`, `strategy_b`, each with its fixed rate vector, class-balanced sampling), on **validation data only**:
+
+- **A, single degrees.** The all-ones baseline, then one degree at a time with each factor in `0, 0.05, 0.1, 0.25, 0.5, 0.75` and the other degrees at 1.
+- **B, a limited set, no grid search.** (i) Combinations of two or more degrees whose best single-degree candidate beat the baseline's accuracy minus forgetting _and_ is feasible. (ii) Four fixed example vectors, which are **always evaluated**, independently of how their single-degree parts scored or whether those were feasible. Each is then selected or rejected only on its own measured metrics.
+- **Selection rule.** (1) The acquisition constraint below. (2) Among the feasible candidates, the Pareto front of final accuracy and forgetting. (3) The largest accuracy minus forgetting on that front. It is applied to all of A and B ("best overall"), to A alone ("best individual") and to B alone ("best multiple").
+- **C, final comparison.** The baseline and the selected configurations are run once on the test set with the test seeds, paired by seed with the baseline. The selection seeds (`--select-seeds`) and test seeds (`--test-seeds`) must be non-empty, free of duplicates, and disjoint; the script and `run_degree_control_study` reject anything else before training. Test data never enters selection.
+
+### Acquisition constraint
+
+A candidate is feasible only if, for **every** experience, its seed-mean accuracy right after that experience was learned (`accuracy_matrix[t][t]`) is at least `--min-acquisition` (default `ACQUISITION_FLOOR = 0.5`). Without it, accuracy minus forgetting can reward a configuration that does not learn an experience on arrival and recovers it later through replay.
+
+- The constraint is applied to the **seed mean** on validation data; an individual seed can be below the floor.
+- 0.5 is an experimental constraint, not an independently established threshold: it was set in the code before the first run but with earlier poor first-experience results in view. Do not tune it against test results; if you change it, fix the new value before running.
+- There is **no fallback**. If no candidate is feasible, the choice is `null` and the result lists it under `no_feasible_candidate`. The baseline is always run and reported, feasible or not.
+
+### Reported quantities (distinct, never under one name)
+
+- `final_mean_accuracy`, `mean_forgetting` (best accuracy an experience ever had minus its final accuracy, averaged over the experiences that have a later evaluation) and `final_current_accuracy`.
+- `immediate_accuracy_by_experience`: the seed mean of the accuracy on each experience right after it was learned.
+- `min_mean_immediate_accuracy`: the minimum of that list. **This is what the floor is applied to** (on validation data); it is also reported for the test runs, where it is informative only.
+- `worst_immediate_accuracy`: a _per-run_ value, the worst experience within one run. Its `summary` entry is the mean over seeds of those per-run minima, which is never larger than `min_mean_immediate_accuracy` and smaller whenever the seeds disagree about which experience is worst. The floor is never applied to it.
+
+### Result of one saved run (Split MNIST)
+
+`python experiments/degree_control.py --dataset split_mnist --output results/degree_control.json`: 10% of the training set held out for validation, selection seeds 0-2, test seeds 3-9, 3 epochs, batch size 128, 200 replay examples per class, 3 reference examples per class, floor 0.5. About four minutes on the CPU environment used here. The run is deterministic (a rerun after the final code changes reproduced the same selections and numbers); the generated JSON is not part of the repository. The table shows the baseline and the configuration selected as best overall (test seeds, means over 7 seeds).
+
+| Strategy | Selected factors | Accuracy (baseline → selected) | Forgetting (baseline → selected) | Second experience on arrival (baseline → selected) |
+| --- | --- | --- | --- | --- |
+| `ordinary` | `[0.05, 0.05, 0, 1]` | 0.7689 → 0.7595 | 0.0968 → 0.0739 | 0.867 → 0.786 |
+| `frozen_old` | `[1, 0.05, 0, 1]` | 0.7782 → 0.7684 | 0.1046 → 0.0832 | 0.883 → 0.769 |
+| `strategy_b` | `[1, 0.25, 0, 1]` | 0.7585 → 0.7538 | 0.0852 → 0.0669 | 0.839 → 0.716 |
+
+For each strategy the selected configuration had lower final accuracy (by 0.0048 to 0.0099) and lower forgetting (by 0.0183 to 0.0229) than its baseline in all 7 test seeds. The worst-case `min_mean_immediate_accuracy` on the test runs was 0.706 → 0.680 (`ordinary`), 0.722 → 0.704 (`frozen_old`) and 0.656 → 0.642 (`strategy_b`); in every strategy it is the last experience. On validation data 3 of 33 (`ordinary`), 3 of 30 (`frozen_old`) and 6 of 33 (`strategy_b`) candidates were infeasible. For example `m[1,0,0.05,1]` reaches only 0.485 on the first experience under `ordinary` and `frozen_old`, and an unconstrained accuracy-minus-forgetting rule would have chosen it.
+
+### What this does and does not show
+
+- The results are evidence from this experiment of a **plasticity-retention trade-off**: under the acquisition constraint, the selected configurations have lower measured forgetting and slightly lower final accuracy than their baselines. They do not show that degree control improves retention, and lower forgetting is not by itself better continual learning.
+- The floor is permissive. Every selected configuration passes it while learning the second experience 8 to 12 points worse on arrival than its baseline (table above), and all three set the degree-2 factor to 0. This experiment cannot separate "retains more" from "learns less strongly"; per-experience arrival accuracy has to be read together with forgetting.
+- Strategy B preserves its reference logits; the table does not measure old-data retention separately, and Strategy B's forgetting is still non-zero.
+- One dataset (Split MNIST with a fixed random projection, `--projection-seed 0`), one set of base rates per strategy, one floor, selection on three seeds of a 10% validation split. The seven test seeds vary the task plan and shuffling, not the data or the projection. The consistent direction over seeds is not a significance test and not evidence of generalisation. How the result changes with the floor was not studied.
+- No configuration is claimed to be optimal. The selected vectors are what this protocol chose on this validation split.
