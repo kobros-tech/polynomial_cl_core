@@ -231,6 +231,8 @@ LEARNING_FIELDS = (
     "mean_accuracy_by_task",
     "learning_rate",
     "degree_learning_rates",
+    "degree_control_factors",
+    "effective_degree_learning_rates",
     "per_degree_rates",
     "sampling",
     "sampling_by_task",

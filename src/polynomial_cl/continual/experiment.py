@@ -30,8 +30,11 @@ from ..training.multiclass import (
 )
 from .degree_rates import (
     N_DEGREE_GROUPS,
+    apply_degree_control,
+    as_degree_control,
     as_degree_rates,
     degree_of_feature,
+    is_identity_control,
     step_scale_for,
 )
 from .features import (
@@ -359,6 +362,7 @@ def run_condition(
     n_ref_per_class=N_REF_PER_CLASS,
     feature_power=0.0,
     sampling=DEFAULT_SAMPLING,
+    degree_control_factors=None,
     diagnostics=False,
     timings=None,
 ):
@@ -372,6 +376,13 @@ def run_condition(
     ``feature_power`` p > 0 gives every feature its own step size
     ``learning_rate * (max_rms / rms_i) ** p`` (rms of feature i on the experience's training
     set): p = 0 is one shared rate, p = 1 diagonal preconditioning.
+
+    ``degree_control_factors`` (one factor in [0, 1] per degree group, default None = all
+    ones) multiplies the per-degree rates: the effective rate of degree d is ``rates[d] *
+    factors[d]`` (``degree_rates.diagonal_learning_rates``). A control that changes anything
+    (some factor below 1) cannot be combined with ``feature_power > 0`` and raises
+    ``ValueError``; an all-ones control is the identity, is treated as no control, and is
+    accepted together with ``feature_power``.
 
     ``diagnostics`` is off by default: a run then does only the work that learning and the
     accuracy matrix need. ``diagnostics=True`` additionally observes the run: the two full
@@ -409,6 +420,20 @@ def run_condition(
     spent = {"training": 0.0, "evaluation": 0.0, "diagnostics": 0.0}
     run_started = time.perf_counter()  # everything below is part of the timed call
     rate_vector = as_degree_rates(learning_rate)
+    control = None
+    if degree_control_factors is not None:
+        control = as_degree_control(degree_control_factors)
+        if is_identity_control(control):
+            control = None
+        elif feature_power:
+            raise ValueError(
+                "degree-control factors cannot be combined with feature_power"
+            )
+    if control is not None:
+        per_degree = True
+    effective_rates = (
+        rate_vector if control is None else apply_degree_control(rate_vector, control)
+    )
     degrees = DEGREES[condition]
     n_tasks = len(degrees)
     weights = np.zeros(
@@ -467,8 +492,20 @@ def run_condition(
         group_index = group_index_full[:count]
         n_active = int(group_index.max()) + 1
         base_rate, group_scale = learning_rate, None
+        trains = True
         if per_degree:
-            base_rate, group_scale = step_scale_for(rate_vector, group_index)
+            if np.any(effective_rates[:n_active] > 0):
+                base_rate, group_scale = step_scale_for(effective_rates, group_index)
+            elif control is not None:
+                # Degree control zeroes every currently active group: a valid no-op
+                # experience. Later experiences that activate a group with a positive
+                # effective rate train normally.
+                trains = False
+                base_rate = 1.0
+                group_scale = np.zeros(count, np.float32)
+            else:
+                # Keep the existing contract: raises when no active group has a positive rate.
+                base_rate, group_scale = step_scale_for(effective_rates, group_index)
         step_scale = feature_scale
         if group_scale is not None:
             step_scale = (
@@ -496,31 +533,32 @@ def run_condition(
             spent["diagnostics"] += time.perf_counter() - mark
         fit_stats = {}
         mark = time.perf_counter()
-        weights = fit_task(
-            weights,
-            data.train_x[indices, :count],
-            data.train_y[indices].astype(np.int64, copy=False),
-            data.train_x[replay, :count],
-            data.train_y[replay].astype(np.int64, copy=False),
-            epochs=epochs,
-            learning_rate=base_rate,
-            batch_size=batch_size,
-            seed=seed + task,
-            eligible_classes=np.arange(n_seen),
-            update_scale=scale,
-            null_basis=null_basis,
-            null_groups=null_groups,
-            feature_scale=feature_scale,
-            group_scale=group_scale,
-            group_index=group_index if diagnostics else None,
-            epoch_sampler=sampler,
-            stats=fit_stats,
-        )
+        if trains:
+            weights = fit_task(
+                weights,
+                data.train_x[indices, :count],
+                data.train_y[indices].astype(np.int64, copy=False),
+                data.train_x[replay, :count],
+                data.train_y[replay].astype(np.int64, copy=False),
+                epochs=epochs,
+                learning_rate=base_rate,
+                batch_size=batch_size,
+                seed=seed + task,
+                eligible_classes=np.arange(n_seen),
+                update_scale=scale,
+                null_basis=null_basis,
+                null_groups=null_groups,
+                feature_scale=feature_scale,
+                group_scale=group_scale,
+                group_index=group_index if diagnostics else None,
+                epoch_sampler=sampler,
+                stats=fit_stats,
+            )
         spent["training"] += time.perf_counter() - mark
         if diagnostics:
             mark = time.perf_counter()
             effective = (
-                rate_vector
+                effective_rates
                 if per_degree
                 else np.full(N_DEGREE_GROUPS, float(learning_rate))
             )
@@ -632,6 +670,10 @@ def run_condition(
         if per_degree
         else float(learning_rate),
         "degree_learning_rates": [float(v) for v in rate_vector],
+        "degree_control_factors": [
+            float(v) for v in (np.ones(N_DEGREE_GROUPS) if control is None else control)
+        ],
+        "effective_degree_learning_rates": [float(v) for v in effective_rates],
         "per_degree_rates": bool(per_degree),
         "sampling": sampling,
         "sampling_by_task": sampling_log,

@@ -321,3 +321,94 @@ def test_joint_training_script_ten_class_reference(tmp_path):
 def test_joint_training_ten_class_requires_a_dataset():
     proc = run_script("joint_training.py", "--experiment", "ten_class", check=False)
     assert proc.returncode != 0 and "--dataset" in proc.stderr
+
+
+DEGREE_CONTROL_SMALL = (
+    "--dataset",
+    "synthetic_2d",
+    "--strategies",
+    "ordinary",
+    "--select-seeds",
+    0,
+    "--test-seeds",
+    1,
+    "--epochs",
+    1,
+    "--memory-per-class",
+    2,
+    "--n-ref-per-class",
+    2,
+    "--train-per-class",
+    60,
+    "--test-per-class",
+    6,
+)
+
+
+def test_degree_control_script_writes_a_self_describing_json_result(tmp_path):
+    out = tmp_path / "nested" / "degree_control.json"
+    run_script(
+        "degree_control.py",
+        *DEGREE_CONTROL_SMALL,
+        "--min-acquisition",
+        0.25,
+        "--output",
+        out,
+    )
+    result = json.loads(out.read_text())
+    assert result["dataset"] == "synthetic_2d"
+    assert result["select_seeds"] == [0] and result["test_seeds"] == [1]
+    assert not set(result["select_seeds"]) & set(result["test_seeds"])
+    assert result["min_acquisition_accuracy"] == 0.25
+    assert result["protocol"]["min_acquisition"] == 0.25
+    (cell,) = result["cells"]
+    assert cell["key"] == "ordinary"
+    selection = cell["selection"]
+    assert selection["acquisition_floor"] == 0.25
+    # every validation candidate reports how well each experience was learned on arrival
+    for metrics in selection["validation_metrics"].values():
+        assert len(metrics["immediate_accuracy_by_experience"]) == 5
+        assert 0 <= metrics["min_mean_immediate_accuracy"] <= 1
+        assert metrics["min_mean_immediate_accuracy"] == min(
+            metrics["immediate_accuracy_by_experience"]
+        )
+    # a selected candidate is feasible; an empty choice is reported, not hidden
+    for label in ("best_individual", "best_multiple", "best_overall"):
+        chosen = selection[label]
+        if chosen is None:
+            assert label in selection["no_feasible_candidate"]
+        else:
+            assert chosen in selection["feasible"]
+    baseline = cell["final"]["baseline"]
+    assert baseline["immediate_accuracy_by_experience"]
+    assert "min_mean_immediate_accuracy" in baseline
+    assert "worst_immediate_accuracy" in baseline["summary"]
+
+
+def test_degree_control_script_rejects_overlapping_selection_and_test_seeds(tmp_path):
+    out = tmp_path / "x.json"
+    args = list(DEGREE_CONTROL_SMALL)
+    args[args.index("--test-seeds") + 1] = 0  # same as the selection seed
+    proc = run_script("degree_control.py", *args, "--output", out, check=False)
+    assert proc.returncode != 0 and "overlap" in proc.stderr
+    assert not out.exists()
+
+
+def test_degree_control_script_rejects_invalid_arguments_cleanly(tmp_path):
+    out = tmp_path / "x.json"
+    for extra, message in (
+        (("--select-seeds", 0, 0), "duplicate seeds"),
+        (("--test-seeds", 1, 1), "duplicate seeds"),
+        (("--min-acquisition", 1.5), "--min-acquisition"),
+        (("--min-acquisition", -0.1), "--min-acquisition"),
+        (("--min-acquisition", "nan"), "--min-acquisition"),
+        (("--min-acquisition", "high"), "invalid float value"),
+        (("--strategies", "no_such_strategy"), "invalid choice"),
+    ):
+        args = [*DEGREE_CONTROL_SMALL, *extra]
+        proc = run_script("degree_control.py", *args, "--output", out, check=False)
+        assert proc.returncode == 2, (extra, proc.stderr)  # argparse usage error
+        assert message in proc.stderr and "Traceback" not in proc.stderr
+        assert not out.exists()
+    missing = run_script("degree_control.py", *DEGREE_CONTROL_SMALL, check=False)
+    assert missing.returncode == 2 and "--output" in missing.stderr
