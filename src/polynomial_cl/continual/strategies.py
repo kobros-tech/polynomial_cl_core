@@ -24,8 +24,8 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import numpy as np
+import stable_cl
 
-from ..training.multiclass import null_space_basis
 from .replay import stored_indices
 
 # Update rules compared on the ``expanding`` schedule (same definitions as the binary
@@ -74,14 +74,26 @@ def update_restrictions(
     memory_indices,
     n_ref_per_class,
     step_scale,
+    base_rate=1.0,
 ) -> UpdateRestrictions:
     """Constraints of ``strategy`` for experience ``task`` (0-based).
 
     ``old_rows`` / ``old_classes`` are the feature rows and class columns that existed before
-    this experience; ``step_scale`` (or None) is the per-feature step multiplier that is also
-    applied to the reference design, so the null space is that of the effective update.
+    this experience; ``step_scale`` (or None) is the per-feature step multiplier ``m`` and
+    ``base_rate`` the learning-rate factor ``eta``. The null space is that of the reference
+    design scaled by the effective rates ``d = eta * m`` (float64), as in ``stable_cl``; it does
+    not depend on the positive factor ``eta``, which is passed for completeness.
     """
     scale = null_basis = refs = null_groups = None
+    rates = np.full(count, float(base_rate))
+    if step_scale is not None:
+        rates = rates * np.asarray(step_scale, dtype=np.float64)
+
+    def basis_of(ref_design, columns=slice(None)):
+        """Null basis of the reference design with effective rates ``rates``, as float32."""
+        basis = stable_cl.null_basis(ref_design[:, columns], rates[columns])
+        return basis.astype(np.float32)
+
     if strategy in ("frozen_old", "small_old_lr"):
         scale = np.ones(weights_shape, np.float32)
         scale[:old_rows, :old_classes] = (
@@ -91,27 +103,22 @@ def update_restrictions(
         scale = np.ones(weights_shape, np.float32)
         scale[:old_rows, :old_classes] = 0.0
         refs = stored_indices(memory_indices, old_classes, n_ref_per_class)
-        ref_design = train_x[refs, :count]
-        if step_scale is not None:
-            ref_design = ref_design * np.sqrt(step_scale)
+        ref_design = train_x[refs, :count].astype(np.float64)
         # Old-class columns may only move through the NEW feature rows; the null space is
         # taken inside those rows. New-class columns see every row (nothing there is old),
         # as in strategy_b, so reference inputs also keep their new-class logits.
         rows = np.arange(old_rows, count)
         old_basis = np.zeros((count, 0), np.float32)
         if len(rows):
-            old_basis = np.zeros(
-                (count, null_space_basis(ref_design[:, rows]).shape[1]), np.float32
-            )
-            old_basis[rows] = null_space_basis(ref_design[:, rows])
+            rows_basis = basis_of(ref_design, rows)
+            old_basis = np.zeros((count, rows_basis.shape[1]), np.float32)
+            old_basis[rows] = rows_basis
         null_groups = [
             (slice(0, old_classes), old_basis),
-            (slice(old_classes, n_seen), null_space_basis(ref_design)),
+            (slice(old_classes, n_seen), basis_of(ref_design)),
         ]
     elif strategy == "strategy_b" and task:
         refs = stored_indices(memory_indices, old_classes, n_ref_per_class)
-        ref_design = train_x[refs, :count]
-        if step_scale is not None:
-            ref_design = ref_design * np.sqrt(step_scale)
-        null_basis = null_space_basis(ref_design)
+        ref_design = train_x[refs, :count].astype(np.float64)
+        null_basis = basis_of(ref_design)
     return UpdateRestrictions(scale, null_basis, refs, null_groups)

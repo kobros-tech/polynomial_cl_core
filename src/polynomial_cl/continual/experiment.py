@@ -523,6 +523,7 @@ def run_condition(
             memory_indices=memory_indices,
             n_ref_per_class=n_ref_per_class,
             step_scale=step_scale,
+            base_rate=base_rate,
         )
         scale, null_basis, refs, null_groups = restrictions
         if diagnostics:

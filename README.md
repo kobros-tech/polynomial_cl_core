@@ -54,7 +54,7 @@ Only Python, NumPy, Matplotlib and Jupyter are used (no PyTorch / TensorFlow / s
 ```bash
 cd polynomial_cl_core
 python -m venv .venv && source .venv/bin/activate     # optional
-pip install -e ".[dev]"                                # numpy, matplotlib + pytest, jupyter, nbformat, nbconvert
+pip install -e ".[dev]"                                # numpy, matplotlib, stable-continual-learning (pinned git commit) + pytest, jupyter, nbformat, nbconvert
 python -m pytest                                       # fast test suite (seconds)
 python -m pytest -m slow                               # executes both notebooks in a clean kernel (minutes)
 jupyter lab notebooks/                                 # or: jupyter notebook

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import numpy as np
+import stable_cl
 
 from ..models.multiclass import softmax
 
@@ -59,6 +60,15 @@ def fit_task(
     ``feature_scale`` (D = feature_scale * group_scale), so everything above, including the
     null-space projection, holds for D; the two arguments stay separate because they are
     different mechanisms. The effective rate of feature i is ``learning_rate * D[i]``.
+
+    The mathematics of the update is that of the ``stable_cl`` package, with the effective rate
+    ``d = learning_rate * D`` (float64, learning rate included) as its diagonal. The ordinary
+    step ``d[:, None] * G`` is :func:`stable_cl.ordinary_step`; it is written inline because that
+    function re-validates its arguments on every call and this loop calls it once per
+    mini-batch. Every null-space step is :func:`stable_cl.relaxed_step` with ``beta = 0``, and
+    ``update_scale`` is applied to the gradient first, so the step is ``S(update_scale * G)``.
+    A ``null_groups`` entry applies the step to its own columns only; columns of a gradient
+    are independent under the step, so this equals applying each group's basis to its block.
 
     ``epoch_sampler`` selects how mini-batches are formed. ``None`` (default) shuffles the
     combined rows every epoch and reads each once. Otherwise it is a callable
@@ -129,7 +139,10 @@ def fit_task(
             step_scale = step_scale * feature_scale
         if group_scale is not None:
             step_scale = step_scale * group_scale
-        scale_root = np.sqrt(step_scale)[:, None]
+    # effective per-feature rate d = learning_rate * D, in float64, learning rate included
+    rates = np.full(weights.shape[0], float(learning_rate))
+    if step_scale is not None:
+        rates = rates * step_scale.astype(np.float64)
     if eligible_classes is None:
         eligible_classes = np.arange(weights.shape[1], dtype=np.int64)
     else:
@@ -173,28 +186,17 @@ def fit_task(
         raw_gradient = gradient
         if update_scale is not None:
             gradient = gradient * update_scale[:, eligible_classes]
+        gradient = np.asarray(gradient, dtype=np.float64)
         if null_groups is not None:
-            masked = gradient
-            gradient = (
-                masked.copy() if step_scale is None else masked * step_scale[:, None]
-            )
+            step = rates[:, None] * gradient  # columns outside every group: ordinary
             for columns, basis in null_groups:
-                if step_scale is None:
-                    gradient[:, columns] = basis @ (basis.T @ masked[:, columns])
-                else:
-                    gradient[:, columns] = scale_root * (
-                        basis @ (basis.T @ (scale_root * masked[:, columns]))
-                    )
-        elif step_scale is None:
-            if null_basis is not None:
-                gradient = null_basis @ (null_basis.T @ gradient)
-        elif null_basis is None:
-            gradient = gradient * step_scale[:, None]
+                step[:, columns] = stable_cl.relaxed_step(
+                    gradient[:, columns], basis, rates, 0.0
+                )
+        elif null_basis is not None:
+            step = stable_cl.relaxed_step(gradient, null_basis, rates, 0.0)
         else:
-            gradient = scale_root * (
-                null_basis @ (null_basis.T @ (scale_root * gradient))
-            )
-        step = learning_rate * gradient
+            step = rates[:, None] * gradient  # stable_cl.ordinary_step, inline
         weights[:, eligible_classes] -= step
         if group_index is not None:
             grad_l1 += np.bincount(
@@ -220,13 +222,17 @@ def fit_task(
 
 
 def null_space_basis(design: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
-    """Orthonormal basis (n_features, k) of {v : design @ v = 0}; k = 0 if nothing is free."""
+    """Orthonormal basis (n_features, k) of {v : design @ v = 0}; k = 0 if nothing is free.
+
+    A thin float32 wrapper of :func:`stable_cl.null_basis` with unit rates, kept for the existing
+    interface. The training strategies call ``stable_cl.null_basis`` directly with the full
+    effective rates. The threshold is the relative one of the stable package,
+    ``rtol * sigma_1`` with ``rtol`` in ``[0, 1)``; it replaces the former
+    ``rtol * max(sigma_1, 1)`` and differs from it only when ``sigma_1 < 1``.
+    """
     design = np.asarray(design, dtype=np.float64)
-    if design.shape[0] == 0:
-        return np.eye(design.shape[1], dtype=np.float32)
-    _, singular, vt = np.linalg.svd(design, full_matrices=True)
-    rank = int(np.sum(singular > rtol * max(singular[0], 1.0)))
-    return vt[rank:].T.astype(np.float32)
+    basis = stable_cl.null_basis(design, np.ones(design.shape[1]), rtol)
+    return basis.astype(np.float32)
 
 
 def cross_entropy(weights, features, labels, n_classes):
