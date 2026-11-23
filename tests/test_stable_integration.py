@@ -560,7 +560,9 @@ def test_bases_use_the_relative_tolerance_of_stable():
     assert stable_cl.null_basis(design, rates, 0.3).shape[1] < 12
     # with sigma_1 >= 1 and rtol = 1e-10 the two rules coincide
     design = np.random.default_rng(1).normal(size=(4, 12)) * 5
-    assert stable_cl.null_basis(design, rates).shape[1] == legacy_null_dim(design, 1e-10)
+    assert stable_cl.null_basis(design, rates).shape[1] == legacy_null_dim(
+        design, 1e-10
+    )
 
 
 # ---------------------------------------------------------------- architecture (multiclass path)

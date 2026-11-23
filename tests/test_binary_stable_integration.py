@@ -94,9 +94,9 @@ def test_one_of_the_stored_cases_already_has_sigma1_below_one():
 
 def former_dimension(x_ref, mask):
     """Null-space dimension under the former rule rtol * max(sigma_1, 1)."""
-    design = np.asarray(
-        PolynomialLogisticModel(DEGREE).design(np.atleast_2d(x_ref))
-    )[:, mask]
+    design = np.asarray(PolynomialLogisticModel(DEGREE).design(np.atleast_2d(x_ref)))[
+        :, mask
+    ]
     singular = np.linalg.svd(design, compute_uv=False)
     return design.shape[1] - int((singular > 1e-10 * max(singular[0], 1.0)).sum())
 
