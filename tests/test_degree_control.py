@@ -5,6 +5,7 @@
 
 import numpy as np
 import pytest
+from null_basis_support import null_space_basis
 
 from polynomial_cl.continual import make_feature_data, make_task_plan, run_condition
 from polynomial_cl.continual.degree_rates import (
@@ -15,7 +16,7 @@ from polynomial_cl.continual.degree_rates import (
 )
 from polynomial_cl.continual.experiment import MAX_DEGREE
 from polynomial_cl.continual.strategies import STRATEGIES
-from polynomial_cl.training.multiclass import fit_task, null_space_basis
+from polynomial_cl.training.multiclass import fit_task
 
 RATES = [3.0, 3.0, 0.75, 3.0]
 

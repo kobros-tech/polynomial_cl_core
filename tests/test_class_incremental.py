@@ -3,6 +3,7 @@
 
 import numpy as np
 import pytest
+from null_basis_support import null_space_basis
 
 from polynomial_cl.continual import (
     CONDITIONS,
@@ -26,11 +27,7 @@ from polynomial_cl.continual.features import (
 from polynomial_cl.data import make_synthetic_2d
 from polynomial_cl.data.mnist import make_projection, project_images
 from polynomial_cl.models.multiclass import expand_weights
-from polynomial_cl.training.multiclass import (
-    cross_entropy,
-    fit_task,
-    null_space_basis,
-)
+from polynomial_cl.training.multiclass import cross_entropy, fit_task
 
 
 # ---------------------------------------------------------------- data

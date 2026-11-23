@@ -7,6 +7,7 @@ import inspect
 
 import numpy as np
 import pytest
+from null_basis_support import null_space_basis
 
 from polynomial_cl.continual import (
     STRATEGIES,
@@ -37,10 +38,7 @@ from polynomial_cl.continual.features import (
 )
 from polynomial_cl.continual.sampling import DEFAULT_SAMPLING, balanced_batches
 from polynomial_cl.data import make_synthetic_2d
-from polynomial_cl.training.multiclass import (
-    fit_task,
-    null_space_basis,
-)
+from polynomial_cl.training.multiclass import fit_task
 
 EMPTY_X, EMPTY_Y = np.empty((0, 10), np.float32), np.empty(0, np.int64)
 

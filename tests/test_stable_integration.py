@@ -32,7 +32,7 @@ from polynomial_cl.continual.degree_rates import (
 from polynomial_cl.continual.strategies import update_restrictions
 from polynomial_cl.models.multiclass import softmax
 from polynomial_cl.training import multiclass
-from polynomial_cl.training.multiclass import fit_task, null_space_basis
+from polynomial_cl.training.multiclass import fit_task
 
 ROOT = Path(__file__).parents[1]
 STABLE_SHA = "b6dbd86c3fc76f888c5c69167ed09ac03cc34a5d"
@@ -551,22 +551,16 @@ def legacy_null_dim(design, rtol):
     return design.shape[1] - int((singular > rtol * max(singular[0], 1.0)).sum())
 
 
-def test_null_space_basis_uses_the_relative_tolerance_of_stable():
+def test_bases_use_the_relative_tolerance_of_stable():
+    rates = np.ones(12)
     design = 0.01 * np.random.default_rng(0).normal(size=(4, 12))  # sigma_1 < 1
     assert np.linalg.svd(design, compute_uv=False)[0] < 1
     # the former rule: tol * max(sigma_1, 1) = 0.3 exceeds every singular value
     assert legacy_null_dim(design, 0.3) == 12
-    basis = null_space_basis(design, 0.3)
-    assert basis.dtype == np.float32 and basis.shape[1] < 12
+    assert stable_cl.null_basis(design, rates, 0.3).shape[1] < 12
     # with sigma_1 >= 1 and rtol = 1e-10 the two rules coincide
     design = np.random.default_rng(1).normal(size=(4, 12)) * 5
-    assert null_space_basis(design).shape[1] == legacy_null_dim(design, 1e-10) == 8
-
-
-@pytest.mark.parametrize("rtol", [1.0, 2.0, -1e-3, float("nan")])
-def test_null_space_basis_rejects_a_tolerance_outside_zero_one(rtol):
-    with pytest.raises(ValueError, match=r"\[0, 1\)"):
-        null_space_basis(np.eye(3), rtol)
+    assert stable_cl.null_basis(design, rates).shape[1] == legacy_null_dim(design, 1e-10)
 
 
 # ---------------------------------------------------------------- architecture (multiclass path)
@@ -584,8 +578,12 @@ def test_multiclass_integration_path_has_no_local_decomposition(path):
         if isinstance(node, ast.ImportFrom)
         for alias in node.names
     }
-    # the strategies no longer go through the wrapper
     assert "null_space_basis" not in imported
+
+
+def test_the_float32_null_space_wrapper_is_gone_from_the_package():
+    # core keeps no null-space API of its own; the bases come from stable_cl.null_basis
+    assert not hasattr(multiclass, "null_space_basis")
 
 
 # ---------------------------------------------------------------- dependency pin

@@ -221,20 +221,6 @@ def fit_task(
     return weights
 
 
-def null_space_basis(design: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
-    """Orthonormal basis (n_features, k) of {v : design @ v = 0}; k = 0 if nothing is free.
-
-    A thin float32 wrapper of :func:`stable_cl.null_basis` with unit rates, kept for the existing
-    interface. The training strategies call ``stable_cl.null_basis`` directly with the full
-    effective rates. The threshold is the relative one of the stable package,
-    ``rtol * sigma_1`` with ``rtol`` in ``[0, 1)``; it replaces the former
-    ``rtol * max(sigma_1, 1)`` and differs from it only when ``sigma_1 < 1``.
-    """
-    design = np.asarray(design, dtype=np.float64)
-    basis = stable_cl.null_basis(design, np.ones(design.shape[1]), rtol)
-    return basis.astype(np.float32)
-
-
 def cross_entropy(weights, features, labels, n_classes):
     """Mean softmax cross-entropy when only the first ``n_classes`` outputs compete."""
     probabilities = softmax(features @ weights[:, :n_classes])
