@@ -7,7 +7,7 @@ from null_basis_support import null_space_basis
 
 from polynomial_cl.continual import (
     CONDITIONS,
-    STRATEGIES,
+    METHODS,
     TASK_ORDER,
     holdout_split,
     make_feature_data,
@@ -393,53 +393,65 @@ def _strategy_runs(data, **kwargs):
             epochs=1,
             learning_rate=0.05,
             batch_size=8,
-            strategy=s,
+            method=s,
             diagnostics=True,
             **kwargs,
         )
-        for s in STRATEGIES
+        for s in METHODS
     }
 
 
-def test_default_strategy_is_ordinary_and_unknown_strategies_are_rejected(tiny_data):
+def test_default_method_is_ordinary_and_unknown_or_removed_names_are_rejected(
+    tiny_data,
+):
     tasks, memory = make_task_plan(tiny_data.train_y, 2, 2)
     kwargs = {"seed": 2, "epochs": 1, "learning_rate": 0.05, "batch_size": 8}
     default = run_condition("expanding", tiny_data, tasks, memory, **kwargs)
     explicit = run_condition(
-        "expanding", tiny_data, tasks, memory, strategy="ordinary", **kwargs
+        "expanding", tiny_data, tasks, memory, method="ordinary", **kwargs
     )
     assert default == explicit
-    with pytest.raises(ValueError, match="unknown strategy"):
-        run_condition("expanding", tiny_data, tasks, memory, strategy="nope", **kwargs)
+    assert default["method"] == "ordinary" and default["replay"] is True
+    assert default["beta"] is None and default["api_generation"] == "current"
+    for name in (
+        "nope",
+        "strategy_b",
+        "strategy_b_new",
+        "frozen_old",
+        "small_old_lr",
+        "ordinary_no_replay",
+    ):
+        with pytest.raises(ValueError, match="unknown method"):
+            run_condition("expanding", tiny_data, tasks, memory, method=name, **kwargs)
+    with pytest.raises(TypeError):
+        run_condition(
+            "expanding", tiny_data, tasks, memory, strategy="ordinary", **kwargs
+        )
 
 
-def test_old_coefficient_definition_gives_the_expected_trainable_counts(tiny_data):
-    # 2-D features at degrees 1,2,3,3,3 -> 3,6,10,10,10 rows; classes introduced 2 per experience.
-    # Old coefficients = (rows present before) x (classes introduced before):
-    #   exp2: 3x2, exp3: 6x4, exp4: 10x6, exp5: 10x8, exp1: none.
+def test_ordinary_method_trains_every_coefficient(tiny_data):
+    # 2-D features at degrees 1,2,3,3,3 -> 3,6,10,10,10 rows; classes introduced 2 per
+    # experience: the trainable coefficients are (rows) x (classes introduced so far).
     runs = _strategy_runs(tiny_data)
-    total = [3 * 2, 6 * 4, 10 * 6, 10 * 8, 10 * 10]
-    assert runs["ordinary"]["n_trainable_by_task"] == total
-    assert runs["frozen_old"]["n_trainable_by_task"] == [
-        6,
-        24 - 6,
-        60 - 24,
-        80 - 60,
-        100 - 80,
+    assert runs["ordinary"]["n_trainable_by_task"] == [
+        3 * 2,
+        6 * 4,
+        10 * 6,
+        10 * 8,
+        10 * 10,
     ]
-    assert runs["small_old_lr"]["n_trainable_by_task"] == total  # slowed, not frozen
 
 
-def test_strategy_b_preserves_reference_logits_and_reports_the_free_dimension(
+def test_relaxed_preserves_reference_logits_and_reports_the_free_dimension(
     tiny_data,
 ):
     runs = _strategy_runs(tiny_data, n_ref_per_class=1)
-    b = runs["strategy_b"]
+    b = runs["relaxed"]
     # one reference per old class -> 2, 4, 6, 8 constraints on 6, 10, 10, 10 features
     assert b["null_dim_by_task"] == [None, 4, 6, 4, 2]
     assert max(c for c in b["ref_logit_change_by_task"] if c is not None) <= 1e-4
     assert b["n_trainable_by_task"][1:] == [4 * 4, 6 * 6, 4 * 8, 2 * 10]
-    for name in set(STRATEGIES) - {"strategy_b", "strategy_b_new"}:
+    for name in set(METHODS) - {"relaxed"}:
         assert all(v is None for v in runs[name]["null_dim_by_task"])
         assert all(v is None for v in runs[name]["ref_logit_change_by_task"])
 
@@ -449,10 +461,9 @@ def test_indicators_are_recorded_for_every_strategy(tiny_data):
         assert len(run["train_loss_by_task"]) == 5, name
         losses = run["train_loss_by_task"]
         assert all(before >= after >= 0 for before, after in losses), name
-        if name not in (
-            "strategy_b",
-            "strategy_b_new",
-        ):  # B may have no free dimension left, i.e. nothing to learn
+        if (
+            name != "relaxed"
+        ):  # relaxed may have no free dimension left, nothing to learn
             assert all(before > after for before, after in losses), name
             assert all(v > 0 for v in run["l1_update_by_task"]), name
         assert run["old_logit_change_by_task"][0] is None
@@ -505,15 +516,7 @@ def test_takeover_bounds_the_accuracy_on_old_experiences(tiny_data):
             )
 
 
-def test_frozen_old_changes_old_logits_less_than_ordinary_training(tiny_data):
-    runs = _strategy_runs(tiny_data)
-    assert (
-        runs["frozen_old"]["mean_old_logit_change"]
-        < runs["ordinary"]["mean_old_logit_change"]
-    )
-
-
-def test_strategy_comparison_pairs_strategies_within_a_seed(tiny_data):
+def test_strategy_comparison_pairs_methods_within_a_seed(tiny_data):
     kwargs = {
         "epochs": 1,
         "learning_rate": 0.05,
@@ -523,9 +526,9 @@ def test_strategy_comparison_pairs_strategies_within_a_seed(tiny_data):
     }
     result = run_strategy_comparison(tiny_data, [0, 1], **kwargs)
     assert result == run_strategy_comparison(tiny_data, [0, 1], **kwargs)
-    assert len(result["runs"]) == 2 * len(STRATEGIES)
-    assert set(result["summary"]) == set(STRATEGIES)
-    assert "mean_old_flip_fraction" in result["summary"]["strategy_b"]
+    assert len(result["runs"]) == 2 * len(METHODS)
+    assert set(result["summary"]) == set(METHODS)
+    assert "mean_old_flip_fraction" in result["summary"]["relaxed"]
     with pytest.raises(ValueError, match="seed"):
         run_strategy_comparison(tiny_data, [], **kwargs)
 
@@ -596,25 +599,24 @@ def test_feature_power_runs_for_every_strategy_and_zero_is_the_default(tiny_data
     assert default == run_condition(
         "expanding", tiny_data, tasks, memory, feature_power=0.0, **kwargs
     )
-    for strategy in STRATEGIES:
+    for method in METHODS:
         run = run_condition(
             "expanding",
             tiny_data,
             tasks,
             memory,
-            strategy=strategy,
+            method=method,
             feature_power=1.0,
             n_ref_per_class=1,
             **kwargs,
         )
-        assert run["accuracy_matrix"] != default["accuracy_matrix"] or strategy in (
-            "strategy_b",
-            "strategy_b_new",
+        assert (
+            run["accuracy_matrix"] != default["accuracy_matrix"] or method == "relaxed"
         )
         assert np.isfinite(run["final_mean_accuracy"]) and np.isfinite(
             run["mean_loss_reduction"]
         )
-        if strategy == "strategy_b":
+        if method == "relaxed":
             assert (
                 max(c for c in run["ref_logit_change_by_task"] if c is not None) <= 1e-4
             )
@@ -644,3 +646,118 @@ def test_per_class_accuracy_comes_from_the_same_predictions_as_the_task_accuracy
         # both classes of an experience have equal test counts, so their mean is the task accuracy
         for task, classes in enumerate(TASK_ORDER[: t + 1]):
             assert np.mean(by_class[t, list(classes)]) == pytest.approx(matrix[t, task])
+
+
+# ------------------------------------------------- C4: replay is a protocol option, beta a parameter
+def _protocol_kwargs():
+    return {"seed": 2, "epochs": 1, "learning_rate": 0.05, "batch_size": 8}
+
+
+def test_replay_false_removes_the_replay_examples_and_is_recorded(tiny_data):
+    tasks, memory = make_task_plan(tiny_data.train_y, 2, 2)
+    kwargs = _protocol_kwargs()
+    with_replay = run_condition("expanding", tiny_data, tasks, memory, **kwargs)
+    without = run_condition(
+        "expanding", tiny_data, tasks, memory, replay=False, **kwargs
+    )
+    assert with_replay["replay"] is True and without["replay"] is False
+    assert with_replay["method"] == without["method"] == "ordinary"
+    assert without["accuracy_matrix"] != with_replay["accuracy_matrix"]
+    # nothing is replayed, so old classes are forgotten at least as much
+    assert without["mean_forgetting"] >= with_replay["mean_forgetting"]
+
+
+def test_replay_false_is_independent_of_the_method(tiny_data):
+    tasks, memory = make_task_plan(tiny_data.train_y, 2, 2)
+    run = run_condition(
+        "expanding",
+        tiny_data,
+        tasks,
+        memory,
+        method="relaxed",
+        replay=False,
+        n_ref_per_class=1,
+        diagnostics=True,
+        **_protocol_kwargs(),
+    )
+    assert run["method"] == "relaxed" and run["replay"] is False
+    # the reference inputs still come from the stored memory
+    assert max(c for c in run["ref_logit_change_by_task"] if c is not None) <= 1e-4
+
+
+def test_beta_is_validated_recorded_and_belongs_to_the_relaxed_method(tiny_data):
+    tasks, memory = make_task_plan(tiny_data.train_y, 2, 2)
+    kwargs = _protocol_kwargs()
+    relaxed = run_condition(
+        "expanding",
+        tiny_data,
+        tasks,
+        memory,
+        method="relaxed",
+        n_ref_per_class=1,
+        **kwargs,
+    )
+    explicit = run_condition(
+        "expanding",
+        tiny_data,
+        tasks,
+        memory,
+        method="relaxed",
+        beta=0.0,
+        n_ref_per_class=1,
+        **kwargs,
+    )
+    assert relaxed == explicit and relaxed["beta"] == 0.0
+    mid = run_condition(
+        "expanding",
+        tiny_data,
+        tasks,
+        memory,
+        method="relaxed",
+        beta=0.5,
+        n_ref_per_class=1,
+        **kwargs,
+    )
+    assert mid["beta"] == 0.5 and mid["accuracy_matrix"] != relaxed["accuracy_matrix"]
+    for bad in (-0.1, 1.1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="beta"):
+            run_condition(
+                "expanding",
+                tiny_data,
+                tasks,
+                memory,
+                method="relaxed",
+                beta=bad,
+                **kwargs,
+            )
+    with pytest.raises(TypeError, match="beta"):
+        run_condition(
+            "expanding", tiny_data, tasks, memory, method="relaxed", beta=True, **kwargs
+        )
+    with pytest.raises(ValueError, match="relaxed"):
+        run_condition(
+            "expanding", tiny_data, tasks, memory, method="ordinary", beta=0.5, **kwargs
+        )
+
+
+def test_relaxed_with_beta_one_is_the_ordinary_run_up_to_round_off(tiny_data):
+    tasks, memory = make_task_plan(tiny_data.train_y, 2, 2)
+    kwargs = _protocol_kwargs()
+    ordinary = run_condition("expanding", tiny_data, tasks, memory, **kwargs)
+    relaxed = run_condition(
+        "expanding",
+        tiny_data,
+        tasks,
+        memory,
+        method="relaxed",
+        beta=1.0,
+        n_ref_per_class=1,
+        **kwargs,
+    )
+    assert relaxed["beta"] == 1.0 and relaxed["method"] == "relaxed"
+    np.testing.assert_allclose(
+        np.nan_to_num(np.array(relaxed["accuracy_matrix"], dtype=float), nan=-1),
+        np.nan_to_num(np.array(ordinary["accuracy_matrix"], dtype=float), nan=-1),
+        atol=0.05,  # tiny data: a few test examples may flip under float32 round-off
+    )
+    assert abs(relaxed["final_mean_accuracy"] - ordinary["final_mean_accuracy"]) < 0.05

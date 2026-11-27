@@ -40,7 +40,7 @@ def test_old_class_and_strategy_rows_cover_the_right_experiences(data):
     result = run_strategy_comparison(
         data, [0], epochs=1, memory_per_class=10, diagnostics=True
     )
-    run = next(r for r in result["runs"] if r["strategy"] == "strategy_b_new")
+    run = next(r for r in result["runs"] if r["method"] == "relaxed")
     assert [r["after_experience"] for r in old_class_rows(run)] == [2, 3, 4, 5]
     rows = strategy_diagnostic_rows(run)
     assert [r["experience"] for r in rows] == [1, 2, 3, 4, 5]
@@ -48,7 +48,7 @@ def test_old_class_and_strategy_rows_cover_the_right_experiences(data):
         rows[0]["null_dim"] == "-"
         and rows[-1]["n_trainable"] == run["n_trainable_by_task"][-1]
     )
-    ordinary = next(r for r in result["runs"] if r["strategy"] == "ordinary")
+    ordinary = next(r for r in result["runs"] if r["method"] == "ordinary")
     assert all(r["null_dim"] == "-" for r in strategy_diagnostic_rows(ordinary))
 
 
@@ -59,7 +59,7 @@ def test_sampling_rows_report_processed_examples_and_repetition(data):
     rows = sampling_rows(sampling)
     assert {r["sampling"] for r in rows} == {"shuffled", "class_balanced"}
     shuffled = next(
-        r for r in rows if r["sampling"] == "shuffled" and r["strategy"] == "ordinary"
+        r for r in rows if r["sampling"] == "shuffled" and r["method"] == "ordinary"
     )
     assert (
         shuffled["examples_processed"] == shuffled["examples_available"]
@@ -68,7 +68,7 @@ def test_sampling_rows_report_processed_examples_and_repetition(data):
     balanced = next(
         r
         for r in rows
-        if r["sampling"] == "class_balanced" and r["strategy"] == "ordinary"
+        if r["sampling"] == "class_balanced" and r["method"] == "ordinary"
     )
     assert balanced["updates"] == shuffled["updates"]
     assert np.isfinite(float(balanced["draws_per_example_max"]))
@@ -101,7 +101,7 @@ def test_study_rows_and_pairs_cover_shared_and_selected_vectors(data):
         data,
         [0],
         [1],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         samplings=("shuffled",),
         epochs=1,
         batch_size=64,

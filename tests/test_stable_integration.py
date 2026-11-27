@@ -23,13 +23,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 import stable_cl
+from restrictions_support import build_restrictions as update_restrictions
 
 from polynomial_cl.continual import strategies
 from polynomial_cl.continual.degree_rates import (
     diagonal_learning_rates,
     step_scale_for,
 )
-from polynomial_cl.continual.strategies import update_restrictions
 from polynomial_cl.models.multiclass import softmax
 from polynomial_cl.training import multiclass
 from polynomial_cl.training.multiclass import fit_task
@@ -620,3 +620,94 @@ def test_installed_stable_distribution_is_the_pinned_commit_when_installed_from_
     if "vcs_info" not in info:
         pytest.skip("not installed from a git URL (e.g. a local development copy)")
     assert info["vcs_info"]["commit_id"] == STABLE_SHA
+
+
+# ---------------------------------------------------------------- C4: beta reaches the step
+def _beta_problem(setting):
+    rng = np.random.default_rng(5)
+    train_x = setting["train_x"]
+    weights = (0.1 * rng.normal(size=(COUNT, 10))).astype(np.float32)
+    labels = rng.integers(0, N_SEEN, size=len(train_x))
+    step_scale = np.array([1, 1, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25, 0.25], np.float32)
+    restrictions = update_restrictions(
+        "strategy_b", base_rate=0.5, **{**setting, "step_scale": step_scale}
+    )
+
+    def train(**restrict):
+        return fit_task(
+            weights.copy(),
+            train_x,
+            labels,
+            train_x[:0],
+            labels[:0],
+            epochs=2,
+            learning_rate=0.5,
+            batch_size=len(train_x),
+            seed=0,
+            eligible_classes=np.arange(N_SEEN),
+            group_scale=step_scale,
+            **restrict,
+        )
+
+    return train, restrictions, weights, train_x
+
+
+def test_beta_one_reproduces_the_ordinary_update_for_a_null_basis(setting):
+    train, restrictions, _, _ = _beta_problem(setting)
+    ordinary = train()
+    relaxed_one = train(null_basis=restrictions.null_basis, beta=1.0)
+    relaxed_zero = train(null_basis=restrictions.null_basis)  # default beta = 0
+    assert np.abs(relaxed_one - ordinary).max() <= 1e-6  # float32 round-off only
+    assert np.abs(relaxed_zero - ordinary).max() > 1e-3  # beta = 0 really restricts
+
+
+def test_beta_zero_is_the_default_and_equals_the_explicit_value(setting):
+    train, restrictions, _, _ = _beta_problem(setting)
+    np.testing.assert_array_equal(
+        train(null_basis=restrictions.null_basis),
+        train(null_basis=restrictions.null_basis, beta=0.0),
+    )
+
+
+def test_beta_one_reproduces_the_ordinary_update_for_null_groups(setting):
+    train, _, _, train_x = _beta_problem(setting)
+    legacy = update_restrictions(
+        "strategy_b_new",
+        base_rate=0.5,
+        **{**setting, "step_scale": np.full(COUNT, 0.5, np.float32)},
+    )
+    ordinary = train()
+    # null_groups on its own (no update_scale): beta = 1 is the ordinary step again
+    relaxed_one = train(null_groups=legacy.null_groups, beta=1.0)
+    assert np.abs(relaxed_one - ordinary).max() <= 1e-6
+    assert np.abs(train(null_groups=legacy.null_groups) - ordinary).max() > 1e-3
+
+
+def test_intermediate_beta_interpolates_and_is_passed_to_relaxed_step(
+    monkeypatch, setting
+):
+    train, restrictions, _, _ = _beta_problem(setting)
+    calls = spy(monkeypatch, "relaxed_step")
+    train(null_basis=restrictions.null_basis, beta=0.3)
+    assert calls and all(args[3] == 0.3 for args, _ in calls)
+    monkeypatch.undo()
+    zero = train(null_basis=restrictions.null_basis, beta=0.0)
+    one = train(null_basis=restrictions.null_basis, beta=1.0)
+    mid = train(null_basis=restrictions.null_basis, beta=0.3)
+    assert np.abs(mid - zero).max() > 1e-4 and np.abs(mid - one).max() > 1e-4
+
+
+@pytest.mark.parametrize("beta", [-0.01, 1.01, float("nan"), float("inf")])
+def test_fit_task_rejects_beta_outside_the_unit_interval(beta, setting):
+    train, restrictions, _, _ = _beta_problem(setting)
+    with pytest.raises(ValueError, match="beta"):
+        train(null_basis=restrictions.null_basis, beta=beta)
+    with pytest.raises(ValueError, match="beta"):
+        train(beta=beta)  # validated even where it has no effect
+
+
+@pytest.mark.parametrize("beta", [True, "0.5", None])
+def test_fit_task_rejects_a_non_numeric_beta(beta, setting):
+    train, _, _, _ = _beta_problem(setting)
+    with pytest.raises(TypeError, match="beta"):
+        train(beta=beta)

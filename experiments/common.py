@@ -21,6 +21,38 @@ def add_sampling_argument(p):
     )
 
 
+def _beta(text):
+    import argparse
+
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"beta must be a number, got {text!r}"
+        ) from None
+    if not 0.0 <= value <= 1.0:  # also rejects NaN
+        raise argparse.ArgumentTypeError(f"beta must be in [0, 1], got {text}")
+    return value
+
+
+def add_update_arguments(p):
+    """``--beta`` (relaxed method) and ``--no-replay`` (protocol): not strategies."""
+    p.add_argument(
+        "--beta",
+        type=_beta,
+        default=0.0,
+        help="relaxation of the relaxed method, in [0, 1] (0 = null-space step, 1 = ordinary "
+        "update); ignored by the ordinary method",
+    )
+    p.add_argument(
+        "--no-replay",
+        dest="replay",
+        action="store_false",
+        help="do not add the stored examples of old classes to the training set (replay is on "
+        "by default)",
+    )
+
+
 def add_diagnostics_argument(p):
     p.add_argument(
         "--diagnostics",

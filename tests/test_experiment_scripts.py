@@ -3,6 +3,7 @@
 
 import json
 
+import pytest
 from script_runner import run_script
 
 
@@ -77,14 +78,14 @@ def test_degree_ablation_script_reports_all_three_conditions(tmp_path):
     assert len(result["runs"]) == 3
 
 
-def test_class_incremental_script_strategies_mode(tmp_path):
-    out = tmp_path / "strategies.json"
+def test_class_incremental_script_methods_mode(tmp_path):
+    out = tmp_path / "methods.json"
     run_script(
         "class_incremental.py",
         "--dataset",
         "synthetic_2d",
         "--experiment",
-        "strategies",
+        "methods",
         "--seeds",
         0,
         "--epochs",
@@ -101,16 +102,13 @@ def test_class_incremental_script_strategies_mode(tmp_path):
         out,
     )
     result = json.loads(out.read_text())
-    assert result["protocol"]["experiment"] == "strategies"
+    assert result["protocol"]["experiment"] == "methods"
     assert result["protocol"]["n_ref_per_class"] == 1
-    assert set(result["summary"]) == {
-        "ordinary",
-        "ordinary_no_replay",
-        "small_old_lr",
-        "frozen_old",
-        "strategy_b",
-        "strategy_b_new",
-    }
+    assert result["protocol"]["methods"] == ["ordinary", "relaxed"]
+    assert result["protocol"]["beta"] == 0.0 and result["protocol"]["replay"] is True
+    assert set(result["summary"]) == {"ordinary", "relaxed"}
+    assert {r["method"] for r in result["runs"]} == {"ordinary", "relaxed"}
+    assert all(r["replay"] is True for r in result["runs"])
 
 
 def test_rate_selection_script_selects_on_validation_and_reports_test(tmp_path):
@@ -202,14 +200,14 @@ def test_per_degree_script_runs_study_then_epoch_robustness(tmp_path):
         1,
         "--batch-size",
         16,
-        "--strategies",
-        "strategy_b_new",
+        "--methods",
+        "relaxed",
         "--samplings",
         "class_balanced",
         "--validation-fraction",
         0.5,
     )
-    cell = tmp_path / "cell_strategy_b_new_class_balanced.json"
+    cell = tmp_path / "cell_relaxed_class_balanced.json"
     run_script(
         "per_degree_lr.py",
         *common,
@@ -228,7 +226,8 @@ def test_per_degree_script_runs_study_then_epoch_robustness(tmp_path):
     study = json.loads(cell.read_text())
     assert study["selection_seeds"] == [0] and study["test_seeds"] == [1, 2]
     (c,) = study["cells"]
-    assert c["strategy"] == "strategy_b_new" and c["selected"] in c["pareto"]
+    assert c["method"] == "relaxed" and c["selected"] in c["pareto"]
+    assert c["beta"] == 0.0 and c["replay"] is True and c["api_generation"] == "current"
     longer = tmp_path / "epochs.json"
     run_script(
         "per_degree_lr.py",
@@ -326,7 +325,7 @@ def test_joint_training_ten_class_requires_a_dataset():
 DEGREE_CONTROL_SMALL = (
     "--dataset",
     "synthetic_2d",
-    "--strategies",
+    "--methods",
     "ordinary",
     "--select-seeds",
     0,
@@ -403,7 +402,9 @@ def test_degree_control_script_rejects_invalid_arguments_cleanly(tmp_path):
         (("--min-acquisition", -0.1), "--min-acquisition"),
         (("--min-acquisition", "nan"), "--min-acquisition"),
         (("--min-acquisition", "high"), "invalid float value"),
-        (("--strategies", "no_such_strategy"), "invalid choice"),
+        (("--methods", "no_such_method"), "invalid choice"),
+        (("--methods", "strategy_b"), "invalid choice"),
+        (("--strategies", "ordinary"), "unrecognized arguments"),
     ):
         args = [*DEGREE_CONTROL_SMALL, *extra]
         proc = run_script("degree_control.py", *args, "--output", out, check=False)
@@ -412,3 +413,55 @@ def test_degree_control_script_rejects_invalid_arguments_cleanly(tmp_path):
         assert not out.exists()
     missing = run_script("degree_control.py", *DEGREE_CONTROL_SMALL, check=False)
     assert missing.returncode == 2 and "--output" in missing.stderr
+
+
+# ------------------------------------------------------------------ C4: --beta and --no-replay
+def _methods_args(tmp_path, *extra, name="m.json"):
+    return (
+        "class_incremental.py",
+        "--dataset", "synthetic_2d",
+        "--experiment", "methods",
+        "--seeds", 0,
+        "--epochs", 1,
+        "--memory-per-class", 2,
+        "--train-per-class", 6,
+        "--test-per-class", 4,
+        "--n-ref-per-class", 1,
+        *extra,
+        "--output", tmp_path / name,
+    )  # fmt: skip
+
+
+def test_no_replay_and_beta_are_recorded_by_the_methods_experiment(tmp_path):
+    run_script(*_methods_args(tmp_path, "--no-replay", "--beta", "0.5"))
+    result = json.loads((tmp_path / "m.json").read_text())
+    assert result["protocol"]["replay"] is False and result["protocol"]["beta"] == 0.5
+    runs = {r["method"]: r for r in result["runs"]}
+    assert runs["ordinary"]["replay"] is False and runs["ordinary"]["beta"] is None
+    assert runs["relaxed"]["replay"] is False and runs["relaxed"]["beta"] == 0.5
+
+
+@pytest.mark.parametrize("beta", ["-0.1", "1.5", "nan", "high"])
+def test_the_cli_rejects_beta_outside_the_unit_interval(tmp_path, beta):
+    proc = run_script(*_methods_args(tmp_path, "--beta", beta), check=False)
+    assert proc.returncode == 2 and "beta" in proc.stderr
+    assert "Traceback" not in proc.stderr and not (tmp_path / "m.json").exists()
+
+
+def test_the_cli_refuses_the_removed_strategy_options(tmp_path):
+    for flag in ("--strategy", "--strategies"):
+        proc = run_script(*_methods_args(tmp_path, flag, "strategy_b"), check=False)
+        assert proc.returncode == 2 and "unrecognized arguments" in proc.stderr
+    proc = run_script(
+        "class_incremental.py", "--dataset", "synthetic_2d", "--experiment",
+        "strategies", "--output", tmp_path / "x.json", check=False,
+    )  # fmt: skip
+    assert proc.returncode == 2 and "invalid choice" in proc.stderr
+
+
+def test_beta_and_no_replay_apply_to_the_methods_experiment_only(tmp_path):
+    proc = run_script(
+        "class_incremental.py", "--dataset", "synthetic_2d", "--no-replay",
+        "--output", tmp_path / "x.json", check=False,
+    )  # fmt: skip
+    assert proc.returncode == 2 and "methods" in proc.stderr

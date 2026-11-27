@@ -33,7 +33,7 @@ def main():
     add_dataset_arguments(p)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument(
-        "--strategies", nargs="+", default=list(BASELINES), choices=list(BASELINES)
+        "--methods", nargs="+", default=list(BASELINES), choices=list(BASELINES)
     )
     p.add_argument("--select-seeds", nargs="+", type=int, default=[0, 1, 2])
     p.add_argument("--test-seeds", nargs="+", type=int, default=[3, 4, 5, 6, 7, 8, 9])
@@ -63,7 +63,7 @@ def main():
         make_feature_data(train_x, train_y, test_x, test_y),
         args.select_seeds,
         args.test_seeds,
-        strategies=args.strategies,
+        methods=args.methods,
         epochs=args.epochs,
         batch_size=args.batch_size,
         memory_per_class=args.memory_per_class,

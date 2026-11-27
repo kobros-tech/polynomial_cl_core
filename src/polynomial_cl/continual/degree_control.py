@@ -6,8 +6,8 @@
 Protocol (candidate selection on validation data only; the test set is touched once, for the
 final configurations):
 
-* ``BASELINES``: the three fixed configurations (rates, strategy, sampling) -- never changed.
-* Experiment A (``individual_candidates``): per strategy, the all-one baseline, then one
+* ``BASELINES``: the two fixed configurations (rates, method, sampling) -- never changed.
+* Experiment A (``individual_candidates``): per method, the all-one baseline, then one
   degree at a time with every factor of ``FACTORS`` below 1, the others at 1.
 * Experiment B (``combination_candidates``): a *limited* set built from A, with no grid search.
   It has two parts. (i) Combinations: the best factor of each degree whose single-degree
@@ -17,7 +17,7 @@ final configurations):
   feasible. Every candidate of B is measured on validation data like any other and is then
   eligible only on its own measured metrics (see the selection rule), so an example vector is
   never selected merely because it is an example.
-* Experiment C (``final_comparison``): per strategy, baseline / best individual / best multiple /
+* Experiment C (``final_comparison``): per method, baseline / best individual / best multiple /
   best overall, run on the test data with the test seeds, paired by seed. Two Pareto fronts of
   the validation candidates are reported under distinct names: ``pareto_feasible`` (only
   candidates that satisfy the acquisition constraint, i.e. the fronts the selection rule works
@@ -77,10 +77,11 @@ from .experiment import (
 
 FACTORS = (0.0, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0)
 BASELINES = {
-    "ordinary": {"strategy": "ordinary", "rates": [3.0, 3.0, 3.0, 3.0]},
-    "frozen_old": {"strategy": "frozen_old", "rates": [2.5, 2.5, 10.0, 10.0]},
-    "strategy_b": {"strategy": "strategy_b", "rates": [3.0, 3.0, 0.75, 3.0]},
+    "ordinary": {"method": "ordinary", "rates": [3.0, 3.0, 3.0, 3.0]},
+    # the former ``strategy_b`` configuration: relaxed method with the default beta = 0
+    "relaxed": {"method": "relaxed", "rates": [3.0, 3.0, 0.75, 3.0]},
 }
+# The former ``frozen_old`` baseline ([2.5, 2.5, 10.0, 10.0]) was removed with that strategy.
 SAMPLING = "class_balanced"
 EXAMPLE_VECTORS = (
     (1, 0, 0.05, 1),
@@ -157,8 +158,8 @@ def combination_candidates(individual_scores, examples=EXAMPLE_VECTORS, feasible
     return out
 
 
-def run_seeds(data, seeds, strategy, rates, factors, *, settings):
-    """One strategy / rate vector / control vector for every seed; records get wall time."""
+def run_seeds(data, seeds, method, rates, factors, *, settings):
+    """One method / rate vector / control vector for every seed; records get wall time."""
     runs = []
     for seed in seeds:
         tasks, memory = make_task_plan(data.train_y, seed, settings["memory_per_class"])
@@ -172,7 +173,7 @@ def run_seeds(data, seeds, strategy, rates, factors, *, settings):
             epochs=settings["epochs"],
             learning_rate=rates,
             batch_size=settings["batch_size"],
-            strategy=strategy,
+            method=method,
             n_ref_per_class=settings["n_ref_per_class"],
             sampling=SAMPLING,
             degree_control_factors=factors,
@@ -264,13 +265,13 @@ def paired_difference(runs, baseline_runs, metric):
 def select_for_strategy(
     validation_data, select_seeds, key, *, settings, floor=ACQUISITION_FLOOR, log=None
 ):
-    """Experiments A and B for one strategy on validation data (no test data involved).
+    """Experiments A and B for one method on validation data (no test data involved).
 
     ``floor`` is the acquisition constraint of the module docstring. A ``best_*`` entry is
     ``None`` when no candidate of its pool is feasible.
     """
     base = BASELINES[key]
-    strategy, rates = base["strategy"], base["rates"]
+    method, rates = base["method"], base["rates"]
     metrics, vectors = {}, {}
 
     def measure(group, candidates):
@@ -280,7 +281,7 @@ def select_for_strategy(
             runs = run_seeds(
                 validation_data,
                 select_seeds,
-                strategy,
+                method,
                 rates,
                 factors,
                 settings=settings,
@@ -315,7 +316,7 @@ def select_for_strategy(
             if name is None:
                 log(f"  [{key}] {label}: NO FEASIBLE CANDIDATE (floor {floor:g})")
     return {
-        "strategy": strategy,
+        "method": method,
         "rates": rates,
         "acquisition_floor": floor,
         "individual": list(individual),
@@ -342,7 +343,7 @@ def select_for_strategy(
 
 
 def final_comparison(test_data, test_seeds, key, selection, *, settings, log=None):
-    """Experiment C for one strategy: the (up to) four named configurations on the test set."""
+    """Experiment C for one method: the (up to) four named configurations on the test set."""
     base = BASELINES[key]
     names = {
         "baseline": name_of(ONES),
@@ -357,7 +358,7 @@ def final_comparison(test_data, test_seeds, key, selection, *, settings, log=Non
         runs_by_vector[name] = run_seeds(
             test_data,
             test_seeds,
-            base["strategy"],
+            base["method"],
             base["rates"],
             selection["vectors"][name],
             settings=settings,
@@ -382,7 +383,7 @@ def final_comparison(test_data, test_seeds, key, selection, *, settings, log=Non
             "effective_degree_learning_rates": runs[0][
                 "effective_degree_learning_rates"
             ],
-            "strategy": base["strategy"],
+            "method": base["method"],
             "sampling": SAMPLING,
             "summary": summarize(runs),
             "immediate_accuracy_by_experience": immediate_accuracy_by_experience(runs),
@@ -436,7 +437,7 @@ def run_degree_control_study(
     select_seeds,
     test_seeds,
     *,
-    strategies=tuple(BASELINES),
+    methods=tuple(BASELINES),
     epochs=EPOCHS,
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
@@ -450,11 +451,11 @@ def run_degree_control_study(
     caller before any result is seen.
     """
     select_seeds, test_seeds = validate_seed_lists(select_seeds, test_seeds)
-    strategies = tuple(strategies)
-    unknown = [k for k in strategies if k not in BASELINES]
-    if not strategies or unknown:
+    methods = tuple(methods)
+    unknown = [k for k in methods if k not in BASELINES]
+    if not methods or unknown:
         raise ValueError(
-            f"strategies must be a non-empty subset of {list(BASELINES)}"
+            f"methods must be a non-empty subset of {list(BASELINES)}"
             + (f"; unknown: {unknown}" if unknown else "")
         )
     if not (
@@ -470,7 +471,7 @@ def run_degree_control_study(
         "n_ref_per_class": n_ref_per_class,
     }
     cells = []
-    for key in strategies:
+    for key in methods:
         if log:
             log(f"=== {key}: selection on validation data, seeds {list(select_seeds)}")
         selection = select_for_strategy(

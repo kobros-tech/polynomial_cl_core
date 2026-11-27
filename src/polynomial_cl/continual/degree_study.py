@@ -5,9 +5,9 @@
 
 Protocol (all selection on validation data, never on the test set):
 
-1. ``run_sampling_comparison``: the same strategies, rates, seeds and replay memory under the
+1. ``run_sampling_comparison``: the same methods, rates, seeds and replay memory under the
    existing ``shuffled`` sampling and under ``class_balanced`` sampling.
-2. ``select_rate_vectors`` for one (strategy, sampling) cell, on a validation split carved out
+2. ``select_rate_vectors`` for one (method, sampling) cell, on a validation split carved out
    of the training set with *selection* seeds:
 
    * stage 1, shared reference: the best scalar rate from ``SHARED_RATE_GRID``;
@@ -46,14 +46,15 @@ from .experiment import (
     BATCH_SIZE,
     EPOCHS,
     MEMORY_PER_CLASS,
+    METHODS,
     N_REF_PER_CLASS,
-    STRATEGIES,
     STRATEGY_METRICS,
     make_task_plan,
     recorded_metrics,
     require_diagnostics,
     run_condition,
 )
+from .strategies import LEGACY_STRATEGY_NAMES, check_method
 
 SHARED_RATE_GRID = (0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
 RATE_FACTORS = (0.25, 0.5, 2.0, 4.0)
@@ -61,8 +62,8 @@ SELECTION_METRICS = ("final_mean_accuracy", "mean_forgetting", "final_current_ac
 TRADEOFF_METRICS = (*STRATEGY_METRICS, "final_current_accuracy")
 
 
-def _run_seeds(data, seeds, strategy, rates, *, sampling, settings, log=None, label=""):
-    """Run one strategy with one learning-rate setting for every seed (paired plans).
+def _run_seeds(data, seeds, method, rates, *, sampling, settings, log=None, label=""):
+    """Run one method with one learning-rate setting for every seed (paired plans).
 
     ``log`` (optional callable taking a string) receives one line per finished run.
     """
@@ -82,7 +83,9 @@ def _run_seeds(data, seeds, strategy, rates, *, sampling, settings, log=None, la
                 epochs=settings["epochs"],
                 learning_rate=rates,
                 batch_size=settings["batch_size"],
-                strategy=strategy,
+                method=method,
+                beta=settings["beta"] if method == "relaxed" else 0.0,
+                replay=settings["replay"],
                 n_ref_per_class=settings["n_ref_per_class"],
                 sampling=sampling,
                 diagnostics=settings["diagnostics"],
@@ -98,9 +101,19 @@ def _run_seeds(data, seeds, strategy, rates, *, sampling, settings, log=None, la
     return runs
 
 
-def _settings(epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics=False):
+def _settings(
+    epochs,
+    batch_size,
+    memory_per_class,
+    n_ref_per_class,
+    diagnostics=False,
+    beta=0.0,
+    replay=True,
+):
     return {
         "diagnostics": diagnostics,
+        "beta": beta,
+        "replay": replay,
         "epochs": epochs,
         "batch_size": batch_size,
         "memory_per_class": memory_per_class,
@@ -160,39 +173,41 @@ def run_sampling_comparison(
     seeds,
     *,
     policies=("shuffled", "class_balanced"),
-    strategies=STRATEGIES,
+    methods=METHODS,
     epochs=EPOCHS,
     learning_rate=0.1,
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
     diagnostics=False,
+    beta=0.0,
+    replay=True,
     log=None,
 ):
-    """Same strategies, rate, seeds and replay memory under each sampling policy."""
+    """Same methods, rate, seeds and replay memory under each sampling policy."""
     settings = _settings(
-        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics
+        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics, beta, replay
     )
     out = {}
     for policy in policies:
         runs = [
             run
-            for strategy in strategies
+            for method in methods
             for run in _run_seeds(
                 data,
                 seeds,
-                strategy,
+                method,
                 learning_rate,
                 sampling=policy,
                 settings=settings,
                 log=log,
-                label=f"[{policy}/{strategy}]",
+                label=f"[{policy}/{method}]",
             )
         ]
         out[policy] = {
             "runs": runs,
             "summary": mean_std_by_condition(
-                runs, recorded_metrics(runs, TRADEOFF_METRICS), key="strategy"
+                runs, recorded_metrics(runs, TRADEOFF_METRICS), key="method"
             ),
         }
     return out
@@ -236,7 +251,7 @@ def combine_best_directions(
 def select_rate_vectors(
     validation_data,
     selection_seeds,
-    strategy,
+    method,
     sampling,
     *,
     epochs=EPOCHS,
@@ -247,9 +262,11 @@ def select_rate_vectors(
     factors=RATE_FACTORS,
     min_current_accuracy=None,
     diagnostics=False,
+    beta=0.0,
+    replay=True,
     log=None,
 ):
-    """Stages 1-3 on validation data for one (strategy, sampling) cell.
+    """Stages 1-3 on validation data for one (method, sampling) cell.
 
     Returns the candidate vectors (name -> vector), their validation metrics (mean over the
     selection seeds), the Pareto front, and the name chosen by the selection rule. The
@@ -257,10 +274,10 @@ def select_rate_vectors(
     decides what the validation runs record.
     """
     settings = _settings(
-        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics
+        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics, beta, replay
     )
 
-    tag = f"[{strategy}/{sampling}]"
+    tag = f"[{method}/{sampling}]"
 
     def say(message):
         if log:
@@ -271,7 +288,7 @@ def select_rate_vectors(
         runs = _run_seeds(
             validation_data,
             selection_seeds,
-            strategy,
+            method,
             rates,
             sampling=sampling,
             settings=settings,
@@ -318,7 +335,7 @@ def select_rate_vectors(
 def evaluate_vectors(
     test_data,
     test_seeds,
-    strategy,
+    method,
     sampling,
     vectors,
     *,
@@ -327,20 +344,22 @@ def evaluate_vectors(
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
     diagnostics=False,
+    beta=0.0,
+    replay=True,
     log=None,
 ):
     """Run every named vector on the test data; returns name -> list of run records."""
     settings = _settings(
-        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics
+        epochs, batch_size, memory_per_class, n_ref_per_class, diagnostics, beta, replay
     )
     out = {}
     for i, (name, vector) in enumerate(vectors.items(), 1):
         if log:
-            log(f"  [{strategy}/{sampling}] test {i}/{len(vectors)}: {name} {vector}")
+            log(f"  [{method}/{sampling}] test {i}/{len(vectors)}: {name} {vector}")
         out[name] = _run_seeds(
             test_data,
             test_seeds,
-            strategy,
+            method,
             vector,
             sampling=sampling,
             settings=settings,
@@ -356,18 +375,21 @@ def run_per_degree_study(
     selection_seeds,
     test_seeds,
     *,
-    strategies=STRATEGIES,
+    methods=METHODS,
     samplings=("shuffled", "class_balanced"),
     progress=None,
     min_current_accuracy=None,
     log=None,
     **settings,
 ):
-    """Selection on validation data, then test evaluation, for every (strategy, sampling).
+    """Selection on validation data, then test evaluation, for every (method, sampling).
 
     The selection and test seeds must be disjoint. Returns a JSON-serialisable dict. Settings
-    (``epochs``, ``batch_size``, ``memory_per_class``, ``n_ref_per_class`` and ``diagnostics``,
-    off by default) are passed on to the selection and test runs.
+    (``epochs``, ``batch_size``, ``memory_per_class``, ``n_ref_per_class``, ``diagnostics``
+    (off by default), ``beta`` (relaxed method only, default 0.0) and ``replay`` (default
+    True)) are passed on to the selection and test runs. A cell is identified by
+    ``(method, sampling)``: one beta per method. Before several betas are compared, beta must
+    become part of that identity (``load_study_cells`` refuses duplicate identities).
     """
     shared = sorted(set(selection_seeds) & set(test_seeds))
     if shared:
@@ -377,11 +399,11 @@ def run_per_degree_study(
         )
     cells = []
     for sampling in samplings:
-        for strategy in strategies:
+        for method in methods:
             selection = select_rate_vectors(
                 validation_data,
                 selection_seeds,
-                strategy,
+                method,
                 sampling,
                 min_current_accuracy=min_current_accuracy,
                 log=log,
@@ -390,14 +412,19 @@ def run_per_degree_study(
             runs = evaluate_vectors(
                 test_data,
                 test_seeds,
-                strategy,
+                method,
                 sampling,
                 selection["vectors"],
                 log=log,
                 **settings,
             )
             cell = {
-                "strategy": strategy,
+                "api_generation": "current",
+                "method": method,
+                "beta": float(settings.get("beta", 0.0))
+                if method == "relaxed"
+                else None,
+                "replay": bool(settings.get("replay", True)),
                 "sampling": sampling,
                 **selection,
                 "runs": runs,
@@ -406,6 +433,7 @@ def run_per_degree_study(
             if progress:
                 progress(cell)
     return {
+        "api_generation": "current",
         "selection_seeds": list(selection_seeds),
         "test_seeds": list(test_seeds),
         "selection_rule": "pareto(accuracy, forgetting), max accuracy - forgetting",
@@ -452,12 +480,8 @@ def mean_degree_diagnostic(runs, key):
         return np.nanmean(stacked, axis=0)
 
 
-def load_study_cells(directory):
-    """Merge the ``cell_*.json`` files written by ``experiments/per_degree_lr.py``.
-
-    Returns the same structure as ``run_per_degree_study`` (``cells`` sorted by sampling and
-    strategy), or None if the directory has no cell files. Seed sets must agree across files.
-    """
+def _read_cell_payloads(directory):
+    """Parsed ``cell_*.json`` payloads of ``directory`` (None if there are none)."""
     import json
     from pathlib import Path
 
@@ -468,15 +492,130 @@ def load_study_cells(directory):
     seeds = {(tuple(p["selection_seeds"]), tuple(p["test_seeds"])) for p in payloads}
     if len(seeds) != 1:
         raise ValueError("cell files were produced with different seed sets")
-    cells = [c for p in payloads for c in p["cells"]]
-    cells.sort(key=lambda c: (c["sampling"], STRATEGIES.index(c["strategy"])))
+    return payloads
+
+
+def _merge_cells(payloads, cells, sort_key, name):
+    identities = [(c[name], c["sampling"]) for c in cells]
+    duplicates = sorted({i for i in identities if identities.count(i) > 1})
+    if duplicates:
+        raise ValueError(
+            f"several cells share the identity ({name}, sampling) {duplicates}: a study "
+            "cell is identified by it, so configurations that differ in anything else "
+            "(for example beta) cannot be merged"
+        )
     first = payloads[0]
+    cells.sort(key=sort_key)
     return {
         "selection_seeds": first["selection_seeds"],
         "test_seeds": first["test_seeds"],
         "selection_rule": first["selection_rule"],
         "cells": cells,
     }
+
+
+def load_study_cells(directory):
+    """Merge the ``cell_*.json`` files written by ``experiments/per_degree_lr.py``.
+
+    Returns the same structure as ``run_per_degree_study`` (``cells`` sorted by sampling and
+    method), or None if the directory has no cell files. Seed sets must agree across files.
+
+    Only current-generation files are accepted: every cell needs a ``method`` in ``METHODS``
+    and no ``strategy`` field. A file written under the earlier strategy vocabulary is
+    rejected, never reinterpreted as a current configuration; read it with
+    ``load_legacy_study_cells``.
+    """
+    payloads = _read_cell_payloads(directory)
+    if payloads is None:
+        return None
+    cells = [c for p in payloads for c in p["cells"]]
+    for cell in cells:
+        if "strategy" in cell or cell.get("api_generation") == "legacy":
+            raise ValueError(
+                f"cell {cell.get('strategy')!r}/{cell.get('sampling')!r} is from an earlier "
+                "API generation (strategy vocabulary); load it with load_legacy_study_cells"
+            )
+        if "method" not in cell:
+            raise ValueError(
+                "cell has no 'method': not a current-generation study cell"
+            )
+        check_method(cell["method"])
+    for payload in payloads:
+        if payload.get("api_generation", "current") != "current":
+            raise ValueError("cell file is not a current-generation study file")
+    merged = _merge_cells(
+        payloads, cells, lambda c: (c["sampling"], METHODS.index(c["method"])), "method"
+    )
+    return {"api_generation": "current", **merged}
+
+
+# What a historical strategy means in the current vocabulary (None: no current equivalent).
+# strategy_b -> relaxed beta=0 and ordinary_no_replay -> ordinary replay=False are the
+# relations established by the C2 equivalence tests; the other three strategies were removed.
+_LEGACY_EQUIVALENTS = {
+    "ordinary": {"method": "ordinary", "beta": None, "replay": True},
+    "ordinary_no_replay": {"method": "ordinary", "beta": None, "replay": False},
+    "strategy_b": {"method": "relaxed", "beta": 0.0, "replay": True},
+    "small_old_lr": None,
+    "frozen_old": None,
+    "strategy_b_new": None,
+}
+
+
+def load_legacy_study_cells(directory):
+    """Read ``cell_*.json`` files written under the earlier strategy vocabulary.
+
+    Historical records are preserved exactly: every cell keeps its ``strategy`` name and its
+    runs. Each returned cell is marked ``api_generation = "legacy"``; so is the study. A cell
+    additionally gets ``equivalent_current_configuration`` (a dict with ``method``, ``beta``
+    and ``replay``, or None when the strategy was removed and has no current equivalent).
+    That field is information only: the cell has no ``method`` key, so the analysis
+    functions of this module (``study_rows``, ``run_epoch_robustness`` ...) refuse it rather
+    than mix it with current results. Current-generation files are rejected here.
+    Returns None if the directory has no cell files.
+    """
+    payloads = _read_cell_payloads(directory)
+    if payloads is None:
+        return None
+    cells = []
+    for payload in payloads:
+        if payload.get("api_generation", "legacy") != "legacy":
+            raise ValueError("cell file is not a legacy study file")
+        for cell in payload["cells"]:
+            if "method" in cell or cell.get("api_generation") == "current":
+                raise ValueError(
+                    f"cell {cell.get('method')!r}/{cell.get('sampling')!r} is current-"
+                    "generation; load it with load_study_cells"
+                )
+            if cell.get("strategy") not in LEGACY_STRATEGY_NAMES:
+                raise ValueError(f"unknown legacy strategy: {cell.get('strategy')!r}")
+            cells.append(
+                {
+                    **cell,
+                    "api_generation": "legacy",
+                    "equivalent_current_configuration": _LEGACY_EQUIVALENTS[
+                        cell["strategy"]
+                    ],
+                }
+            )
+    merged = _merge_cells(
+        payloads,
+        cells,
+        lambda c: (c["sampling"], LEGACY_STRATEGY_NAMES.index(c["strategy"])),
+        "strategy",
+    )
+    return {"api_generation": "legacy", **merged}
+
+
+def require_current_study(study, what="this function"):
+    """Raise unless ``study`` holds only current-generation cells (never mix generations)."""
+    if study.get("api_generation") == "legacy" or any(
+        c.get("api_generation") == "legacy" or "method" not in c for c in study["cells"]
+    ):
+        raise ValueError(
+            f"{what} takes current-generation studies only; a legacy study (strategy "
+            "vocabulary, from load_legacy_study_cells) is not mixed with current results"
+        )
 
 
 def run_epoch_robustness(
@@ -488,7 +627,7 @@ def run_epoch_robustness(
     batch_size=BATCH_SIZE,
     memory_per_class=MEMORY_PER_CLASS,
     n_ref_per_class=N_REF_PER_CLASS,
-    strategies=None,
+    methods=None,
     samplings=None,
     diagnostics=False,
     log=None,
@@ -500,12 +639,13 @@ def run_epoch_robustness(
     that length are. ``study`` is the structure from ``run_per_degree_study`` or
     ``load_study_cells``; ``test_seeds`` defaults to the study's test seeds.
     """
+    require_current_study(study, "run_epoch_robustness")
     seeds = list(study["test_seeds"] if test_seeds is None else test_seeds)
     if set(seeds) & set(study["selection_seeds"]):
         raise ValueError("robustness seeds must not include the selection seeds")
     cells = []
     for cell in study["cells"]:
-        if strategies is not None and cell["strategy"] not in strategies:
+        if methods is not None and cell["method"] not in methods:
             continue
         if samplings is not None and cell["sampling"] not in samplings:
             continue
@@ -513,7 +653,7 @@ def run_epoch_robustness(
         runs = evaluate_vectors(
             test_data,
             seeds,
-            cell["strategy"],
+            cell["method"],
             cell["sampling"],
             {n: cell["vectors"][n] for n in names},
             epochs=epochs,
@@ -521,11 +661,15 @@ def run_epoch_robustness(
             memory_per_class=memory_per_class,
             n_ref_per_class=n_ref_per_class,
             diagnostics=diagnostics,
+            beta=cell.get("beta") or 0.0,
+            replay=cell.get("replay", True),
             log=log,
         )
         cells.append(
             {
-                "strategy": cell["strategy"],
+                "method": cell["method"],
+                "beta": cell.get("beta"),
+                "replay": cell.get("replay", True),
                 "sampling": cell["sampling"],
                 "epochs": epochs,
                 "selected": cell["selected"],
@@ -568,6 +712,7 @@ def study_rows(study):
     ``*`` marks the vector selected on validation data and ``^`` a vector on the validation
     Pareto front of accuracy and forgetting.
     """
+    require_current_study(study, "study_rows")
     rows = []
     for cell in study["cells"]:
         for name, runs in cell["runs"].items():
@@ -576,7 +721,7 @@ def study_rows(study):
             s = vector_summary(runs)
             row = {
                 "sampling": cell["sampling"][:5],
-                "strategy": cell["strategy"],
+                "method": cell["method"],
                 "vector": name
                 + ("*" if name == cell["selected"] else "")
                 + ("^" if name in cell["pareto"] else ""),
@@ -594,9 +739,10 @@ def study_rows(study):
 
 def study_pairs(study):
     """``{label: (runs, sampling)}`` for the shared and selected vector of every study cell."""
+    require_current_study(study, "study_pairs")
     pairs = {}
     for cell in study["cells"]:
-        tag = f"{cell['strategy']}/{cell['sampling'][:5]}"
+        tag = f"{cell['method']}/{cell['sampling'][:5]}"
         pairs[f"{tag} shared"] = (cell["runs"]["shared"], cell["sampling"])
         pairs[f"{tag} {cell['selected']}"] = (
             cell["runs"][cell["selected"]],

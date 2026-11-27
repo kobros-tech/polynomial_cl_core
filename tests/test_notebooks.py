@@ -49,7 +49,7 @@ def test_notebook_executes_top_to_bottom_in_a_clean_kernel(path):
             if cell.cell_type == "code"
             for output in cell.outputs
         )
-        assert "fixed_capacity" in printed and "ordinary_no_replay" in printed
+        assert "fixed_capacity" in printed and "relaxed" in printed
 
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)

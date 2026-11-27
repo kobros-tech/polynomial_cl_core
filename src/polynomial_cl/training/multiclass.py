@@ -26,6 +26,7 @@ def fit_task(
     update_scale: np.ndarray | None = None,
     null_basis: np.ndarray | None = None,
     null_groups: list | None = None,
+    beta: float = 0.0,
     feature_scale: np.ndarray | None = None,
     group_scale: np.ndarray | None = None,
     group_index: np.ndarray | None = None,
@@ -65,7 +66,10 @@ def fit_task(
     ``d = learning_rate * D`` (float64, learning rate included) as its diagonal. The ordinary
     step ``d[:, None] * G`` is :func:`stable_cl.ordinary_step`; it is written inline because that
     function re-validates its arguments on every call and this loop calls it once per
-    mini-batch. Every null-space step is :func:`stable_cl.relaxed_step` with ``beta = 0``, and
+    mini-batch. Every null-space step is :func:`stable_cl.relaxed_step` with the relaxation
+    ``beta`` (default 0, validated in [0, 1]; it has an effect only together with
+    ``null_basis`` or ``null_groups``): ``beta = 0`` keeps every step inside the null space and
+    ``beta = 1`` is the ordinary step ``d[:, None] * G`` up to round-off, for every basis.
     ``update_scale`` is applied to the gradient first, so the step is ``S(update_scale * G)``.
     A ``null_groups`` entry applies the step to its own columns only; columns of a gradient
     are independent under the step, so this equals applying each group's basis to its block.
@@ -102,6 +106,13 @@ def fit_task(
         raise ValueError("labels must index an output class")
     if update_scale is not None and update_scale.shape != weights.shape:
         raise ValueError("update_scale must have the same shape as weights")
+    if isinstance(beta, (bool, np.bool_)) or not isinstance(
+        beta, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("beta must be a real number")
+    if not 0.0 <= float(beta) <= 1.0:  # also rejects NaN
+        raise ValueError("beta must be in [0, 1]")
+    beta = float(beta)
     if null_basis is not None and null_basis.shape[0] != weights.shape[0]:
         raise ValueError("null_basis must have one row per feature")
     if null_groups is not None:
@@ -191,10 +202,10 @@ def fit_task(
             step = rates[:, None] * gradient  # columns outside every group: ordinary
             for columns, basis in null_groups:
                 step[:, columns] = stable_cl.relaxed_step(
-                    gradient[:, columns], basis, rates, 0.0
+                    gradient[:, columns], basis, rates, beta
                 )
         elif null_basis is not None:
-            step = stable_cl.relaxed_step(gradient, null_basis, rates, 0.0)
+            step = stable_cl.relaxed_step(gradient, null_basis, rates, beta)
         else:
             step = rates[:, None] * gradient  # stable_cl.ordinary_step, inline
         weights[:, eligible_classes] -= step

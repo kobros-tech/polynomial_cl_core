@@ -25,7 +25,7 @@ from script_runner import run_script
 from polynomial_cl import continual
 from polynomial_cl.continual import (
     CONDITIONS,
-    STRATEGIES,
+    METHODS,
     degree_group_rows,
     make_feature_data,
     make_task_plan,
@@ -215,7 +215,9 @@ KWARGS = {"epochs": 2, "learning_rate": 0.05, "batch_size": 8}
 # Everything that describes the learning run itself; none of it may depend on diagnostics.
 LEARNING_FIELDS = (
     "condition",
-    "strategy",
+    "method",
+    "beta",
+    "replay",
     "seed",
     "active_degree_by_task",
     "feature_count_by_task",
@@ -252,11 +254,11 @@ def _plan(data, seed=3, memory=2):
     return make_task_plan(data.train_y, seed, memory)
 
 
-@pytest.mark.parametrize("strategy", STRATEGIES)
+@pytest.mark.parametrize("method", METHODS)
 @pytest.mark.parametrize("condition", CONDITIONS)
-def test_diagnostics_do_not_change_what_is_learned(tiny_data, condition, strategy):
+def test_diagnostics_do_not_change_what_is_learned(tiny_data, condition, method):
     tasks, memory = _plan(tiny_data)
-    kwargs = {"seed": 3, "strategy": strategy, **KWARGS}
+    kwargs = {"seed": 3, "method": method, **KWARGS}
     default = run_condition(condition, tiny_data, tasks, memory, **kwargs)
     observed = run_condition(
         condition, tiny_data, tasks, memory, diagnostics=True, **kwargs
@@ -398,7 +400,7 @@ def test_diagnostics_can_be_enabled_through_every_comparison_function(tiny_data)
         sampling = continual.run_sampling_comparison(
             tiny_data,
             [0],
-            strategies=("ordinary",),
+            methods=("ordinary",),
             memory_per_class=2,
             **options,
             **kwargs,
@@ -436,7 +438,7 @@ def test_strategy_summary_covers_the_diagnostic_metrics_only_when_recorded(tiny_
 
 # ------------------------------------------------------------------ degree studies
 STUDY = {
-    "strategies": ("ordinary",),
+    "methods": ("ordinary",),
     "samplings": ("shuffled",),
     "epochs": 1,
     "batch_size": 8,
@@ -722,7 +724,7 @@ def _read(path):
     return json.loads(path.read_text())
 
 
-@pytest.mark.parametrize("experiment", ["conditions", "strategies"])
+@pytest.mark.parametrize("experiment", ["conditions", "methods"])
 def test_cli_is_lean_by_default_and_observes_only_with_the_flag(tmp_path, experiment):
     default, observed = tmp_path / "default.json", tmp_path / "observed.json"
     run_script(
@@ -756,7 +758,7 @@ def test_cli_strategy_summary_has_the_diagnostic_metrics_only_with_the_flag(tmp_
     from polynomial_cl.continual.experiment import STRATEGY_METRICS, SUMMARY_METRICS
 
     default, observed = tmp_path / "default.json", tmp_path / "observed.json"
-    args = (*COMMON, "--experiment", "strategies")
+    args = (*COMMON, "--experiment", "methods")
     run_script("class_incremental.py", *args, "--output", default)
     run_script("class_incremental.py", *args, "--diagnostics", "--output", observed)
     for stats in _read(default)["summary"].values():
@@ -776,7 +778,7 @@ def test_the_old_negative_flag_no_longer_exists(tmp_path):
 STUDY_ARGS = (
     "--dataset", "synthetic_2d", "--train-per-class", 12, "--test-per-class", 6,
     "--memory-per-class", 4, "--n-ref-per-class", 1, "--batch-size", 16,
-    "--strategies", "ordinary", "--samplings", "shuffled",
+    "--methods", "ordinary", "--samplings", "shuffled",
     "--validation-fraction", 0.5, "--epochs", 1,
 )  # fmt: skip
 

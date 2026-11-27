@@ -3,7 +3,7 @@
 """Choose per-feature learning rates on a validation split, then report the test result.
 
 For every (feature power p, base learning rate) cell the class-incremental comparison is run on
-a validation split carved out of the training set. Each condition (or strategy) gets the cell
+a validation split carved out of the training set. Each condition (or method) gets the cell
 with the best validation final mean accuracy, so a baseline is tuned as much as the method it is
 compared with. Only the selected cells are then evaluated on the test set. Feature power p gives
 feature i the step size ``lr * (max_rms / rms_i) ** p``; p = 0 is one shared rate.
@@ -34,7 +34,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     add_dataset_arguments(p)
     p.add_argument(
-        "--experiment", choices=("conditions", "strategies"), default="conditions"
+        "--experiment", choices=("conditions", "methods"), default="conditions"
     )
     p.add_argument("--output", type=Path, required=True)
     add_sampling_argument(p)
@@ -58,7 +58,10 @@ def main():
     p.add_argument("--epochs", type=int, default=EPOCHS)
     p.add_argument("--memory-per-class", type=int, default=MEMORY_PER_CLASS)
     p.add_argument(
-        "--n-ref-per-class", type=int, default=N_REF_PER_CLASS, help="strategy_b only"
+        "--n-ref-per-class",
+        type=int,
+        default=N_REF_PER_CLASS,
+        help="relaxed method only",
     )
     args = p.parse_args()
     shared = sorted(set(args.select_seeds) & set(args.test_seeds))
@@ -68,10 +71,10 @@ def main():
             "runs would choose the rates and then be reported as the test estimate"
         )
 
-    run = run_strategy_comparison if args.experiment == "strategies" else run_comparison
+    run = run_strategy_comparison if args.experiment == "methods" else run_comparison
     extra = (
         {"n_ref_per_class": args.n_ref_per_class}
-        if args.experiment == "strategies"
+        if args.experiment == "methods"
         else {}
     )
 

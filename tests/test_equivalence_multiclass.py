@@ -23,9 +23,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 import stable_cl
+from restrictions_support import CURRENT_METHOD, build_restrictions
 
 from polynomial_cl.continual import make_feature_data, run_condition
-from polynomial_cl.continual.strategies import update_restrictions
 from polynomial_cl.models.multiclass import softmax
 from polynomial_cl.training.multiclass import fit_task
 
@@ -40,6 +40,12 @@ TOL_RECORD = 3e-5  # numbers in run_condition records; measured 2.9e-06
 # A wrong learning rate must deviate by at least this many tolerances; the smallest deviation
 # measured over the fixtures is 4.3e-02, i.e. more than 4000 tolerances.
 CONTROL_FACTOR = 100
+
+
+# C4 vocabulary: the golden files are immutable records of the pre-C4 behaviour and keep their
+# strategy names; ``restrictions_support`` maps them to the production code (ordinary,
+# strategy_b = relaxed with beta 0) or to the frozen legacy builders (the removed strategies).
+update_restrictions = build_restrictions
 
 
 def load(name):
@@ -424,11 +430,28 @@ def run_current(entry):
         seed=settings["seed"],
         epochs=settings["epochs"],
         batch_size=settings["batch_size"],
-        strategy=entry["strategy"],
+        method=CURRENT_METHOD[entry["strategy"]],
         n_ref_per_class=settings["n_ref_per_class"],
         diagnostics=True,
         **entry["kwargs"],
     )
+
+
+def expected_record(entry):
+    """The golden record with only the identification fields in the current vocabulary.
+
+    Every number is the pre-C4 value; ``strategy`` becomes ``method`` / ``beta`` / ``replay``
+    (strategy_b = relaxed with beta 0, plain replay) and the generation marker is added.
+    """
+    record = {k: v for k, v in entry["record"].items() if k != "strategy"}
+    method = CURRENT_METHOD[entry["strategy"]]
+    return {
+        **record,
+        "api_generation": "current",
+        "method": method,
+        "beta": 0.0 if method == "relaxed" else None,
+        "replay": True,
+    }
 
 
 def compare_records(actual, expected, path="record"):
@@ -455,15 +478,29 @@ def compare_records(actual, expected, path="record"):
 
 
 RUNS = {f"{r['strategy']}/{r['label']}": r for r in RUN["runs"]}
+# Golden runs of strategies that C4 removed from the public API cannot be reproduced through
+# run_condition any more; their update tensors stay covered at the fit_task level above.
+RETIRED = {n for n, r in RUNS.items() if r["strategy"] not in CURRENT_METHOD}
+REPRODUCIBLE = [n for n in RUNS if n not in RETIRED]
 
 
-@pytest.mark.parametrize("name", list(RUNS))
+@pytest.mark.parametrize("name", REPRODUCIBLE)
 def test_run_condition_record_equals_the_former_implementation(name):
     entry = RUNS[name]
-    assert compare_records(run_current(entry), entry["record"]) <= TOL_RECORD
+    assert compare_records(run_current(entry), expected_record(entry)) <= TOL_RECORD
 
 
-@pytest.mark.parametrize("name", [n for n in RUNS if "noop" in n])
+def test_exactly_the_runs_of_the_removed_strategies_are_retired():
+    assert {RUNS[n]["strategy"] for n in RETIRED} == {
+        "strategy_b_new",
+        "frozen_old",
+        "small_old_lr",
+    }
+    assert {RUNS[n]["strategy"] for n in REPRODUCIBLE} == {"ordinary", "strategy_b"}
+    assert len(RETIRED) == 4
+
+
+@pytest.mark.parametrize("name", [n for n in REPRODUCIBLE if "noop" in n])
 def test_all_zero_first_experience_leaves_the_weights_untouched(name):
     record = run_current(RUNS[name])
     loss_before, loss_after = record["train_loss_by_task"][0]

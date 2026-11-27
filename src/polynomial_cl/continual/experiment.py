@@ -45,8 +45,10 @@ from .features import (
 from .replay import select_memory, stored_indices
 from .sampling import DEFAULT_SAMPLING, epoch_sampler
 from .strategies import (
+    METHODS,
     N_REF_PER_CLASS,
-    STRATEGIES,
+    check_beta,
+    check_method,
     update_restrictions,
 )
 
@@ -168,15 +170,15 @@ INDICATORS = (
     "l1_update_by_task",  # sum |w_after - w_before| over the coefficients used this experience
     "n_trainable_by_task",  # coefficients that may change (B: rank of sqrt(D) N, x classes)
     # Strategy B variants only. Dimension of the null-space basis that constrains the OLD-class
-    # output columns (for strategy_b one shared basis for every column; for strategy_b_new the
-    # basis restricted to the newly added feature rows) and the NEW-class columns. None in
-    # experience 1 (nothing to preserve) and for every other rule.
+    # output columns (one shared basis for every column of the relaxed method; per-group bases
+    # when ``fit_task`` is given ``null_groups``) and the NEW-class columns. None in
+    # experience 1 (nothing to preserve) and for the ordinary method.
     "null_dim_by_task",
     "null_dim_new_class_columns_by_task",
     "old_logit_change_by_task",  # max change of old-class logits on old-class test inputs
     "old_flip_fraction_by_task",  # old-class test inputs whose prediction among old classes changed
     "old_takeover_fraction_by_task",  # old-class test inputs now predicted as a NEW class
-    "ref_logit_change_by_task",  # Strategy B variants: max logit change at the reference inputs
+    "ref_logit_change_by_task",  # relaxed method: max logit change at the reference inputs
 )
 
 
@@ -256,9 +258,9 @@ def _record_indicators(
             allowed &= (np.asarray(step_scale)[:count] > 0)[:, None]
         trainable = int(allowed.sum())
     out["n_trainable_by_task"].append(int(trainable))
-    if null_groups is not None:  # strategy_b_new: separate bases per column group
+    if null_groups is not None:  # separate bases per column group (direct fit_task use)
         old_dim, new_dim = (int(basis.shape[1]) for _, basis in null_groups)
-    elif null_basis is not None:  # strategy_b: one basis shared by every column
+    elif null_basis is not None:  # relaxed method: one basis shared by every column
         old_dim = new_dim = int(null_basis.shape[1])
     else:
         old_dim = new_dim = None
@@ -358,7 +360,9 @@ def run_condition(
     epochs=EPOCHS,
     learning_rate=LEARNING_RATE,
     batch_size=BATCH_SIZE,
-    strategy="ordinary",
+    method="ordinary",
+    beta=0.0,
+    replay=True,
     n_ref_per_class=N_REF_PER_CLASS,
     feature_power=0.0,
     sampling=DEFAULT_SAMPLING,
@@ -368,8 +372,13 @@ def run_condition(
 ):
     """Run one condition; returns a JSON-serialisable record with the accuracy matrix.
 
-    ``strategy`` selects the update rule (see ``STRATEGIES``); the default is plain training with
-    replay. With ``diagnostics=True`` the record also carries indicators of whether the model
+    ``method`` selects the update rule (``METHODS``): ``"ordinary"`` (default, plain
+    rate-weighted steps) or ``"relaxed"`` (relaxed null-space steps with relaxation ``beta``
+    in [0, 1], default 0; ``beta = 1`` is the ordinary update). ``beta`` belongs to the relaxed
+    method; ``method="ordinary"`` rejects a nonzero ``beta``. ``replay`` (default True) is a
+    protocol choice, not a method: with ``replay=False`` the stored examples of old classes
+    are not added to the training set (the reference inputs of the relaxed method are still
+    taken from the stored memory). With ``diagnostics=True`` the record also carries indicators of whether the model
     is learning (loss before/after, size of the update, trainable coefficients) and how much
     the old function moved (change of old-class logits on old-class test inputs).
 
@@ -409,8 +418,9 @@ def run_condition(
     """
     if condition not in CONDITIONS:
         raise ValueError(f"unknown condition: {condition}")
-    if strategy not in STRATEGIES:
-        raise ValueError(f"unknown strategy: {strategy}")
+    check_method(method)
+    beta = check_beta(beta, method)
+    use_replay = bool(replay)
     sampler = epoch_sampler(sampling)
     per_degree = np.ndim(learning_rate) > 0
     if per_degree and feature_power:
@@ -450,7 +460,6 @@ def run_condition(
     group_index_full = degree_of_feature(data.n_components, MAX_DEGREE)
 
     for task, indices in enumerate(task_indices):
-        old_rows = weights.shape[0] if task else 0
         count = n_polynomial_features(data.n_components, degrees[task])
         if count > weights.shape[0]:
             # Expansion invariant: appending zero coefficients must not change any logit.
@@ -467,7 +476,7 @@ def run_condition(
 
         old_classes = 2 * task
         n_seen = 2 * (task + 1)
-        if task and strategy != "ordinary_no_replay":
+        if task and use_replay:
             replay = stored_indices(memory_indices, old_classes)
         else:
             replay = np.empty(0, dtype=np.int64)
@@ -512,11 +521,8 @@ def run_condition(
                 group_scale if feature_scale is None else feature_scale * group_scale
             )
         restrictions = update_restrictions(
-            strategy,
-            weights_shape=weights.shape,
-            old_rows=old_rows,
+            method,
             old_classes=old_classes,
-            n_seen=n_seen,
             count=count,
             task=task,
             train_x=data.train_x,
@@ -549,6 +555,7 @@ def run_condition(
                 update_scale=scale,
                 null_basis=null_basis,
                 null_groups=null_groups,
+                beta=beta,
                 feature_scale=feature_scale,
                 group_scale=group_scale,
                 group_index=group_index if diagnostics else None,
@@ -652,7 +659,10 @@ def run_condition(
         spent["diagnostics"] += time.perf_counter() - mark
     record = {
         "condition": condition,
-        "strategy": strategy,
+        "api_generation": "current",
+        "method": method,
+        "beta": beta if method == "relaxed" else None,
+        "replay": use_replay,
         "seed": seed,
         "diagnostics": bool(diagnostics),
         "active_degree_by_task": list(degrees),
@@ -752,7 +762,9 @@ def run_strategy_comparison(
     data: FeatureData,
     seeds,
     *,
-    strategies=STRATEGIES,
+    methods=METHODS,
+    beta=0.0,
+    replay=True,
     epochs=EPOCHS,
     learning_rate=LEARNING_RATE,
     batch_size=BATCH_SIZE,
@@ -762,7 +774,10 @@ def run_strategy_comparison(
     sampling=DEFAULT_SAMPLING,
     diagnostics=False,
 ):
-    """Compare update rules on the ``expanding`` schedule; same task order and replay per seed.
+    """Compare update methods on the ``expanding`` schedule; same task order and replay per seed.
+
+    ``beta`` applies to the relaxed method only (the ordinary method runs with its own default);
+    ``replay`` is the protocol option of ``run_condition``.
 
     ``diagnostics`` is passed to every ``run_condition`` (off by default). The summary adds the
     diagnostic metrics of ``STRATEGY_METRICS`` only when the runs recorded them.
@@ -772,7 +787,7 @@ def run_strategy_comparison(
     runs = []
     for seed in seeds:
         tasks, memory = make_task_plan(data.train_y, seed, memory_per_class)
-        for strategy in strategies:
+        for method in methods:
             runs.append(
                 run_condition(
                     "expanding",
@@ -783,7 +798,9 @@ def run_strategy_comparison(
                     epochs=epochs,
                     learning_rate=learning_rate,
                     batch_size=batch_size,
-                    strategy=strategy,
+                    method=method,
+                    beta=beta if method == "relaxed" else 0.0,
+                    replay=replay,
                     n_ref_per_class=n_ref_per_class,
                     feature_power=feature_power,
                     sampling=sampling,
@@ -793,7 +810,7 @@ def run_strategy_comparison(
     return {
         "runs": runs,
         "summary": mean_std_by_condition(
-            runs, recorded_metrics(runs, STRATEGY_METRICS), key="strategy"
+            runs, recorded_metrics(runs, STRATEGY_METRICS), key="method"
         ),
     }
 
@@ -929,10 +946,10 @@ def _dash(value):
 
 
 def strategy_diagnostic_rows(run):
-    """Per experience: loss, trainable coefficients and Strategy B null-space sizes of one run.
+    """Per experience: loss, trainable coefficients and relaxed-method null-space sizes of one run (relaxed method).
 
     ``null_dim`` is the dimension of the allowed update space for the old-class columns and
-    ``null_dim_new`` for the new-class columns (``-`` where the strategy has no null-space constraint).
+    ``null_dim_new`` for the new-class columns (``-`` where the method has no null-space constraint).
     """
     require_diagnostics(run, "strategy_diagnostic_rows")
     return [
@@ -950,7 +967,7 @@ def strategy_diagnostic_rows(run):
 
 
 def sampling_rows(sampling):
-    """Examples processed and repetition per sampling policy and strategy (mean over seeds).
+    """Examples processed and repetition per sampling policy and method (mean over seeds).
 
     ``sampling`` is the output of ``run_sampling_comparison``. ``draws_per_example`` is, for
     the last experience, how often each stored example of the least- and most-drawn class was
@@ -958,8 +975,8 @@ def sampling_rows(sampling):
     """
     rows = []
     for policy, result in sampling.items():
-        for strategy in result["summary"]:
-            runs = [r for r in result["runs"] if r["strategy"] == strategy]
+        for method in result["summary"]:
+            runs = [r for r in result["runs"] if r["method"] == method]
             last = [r["sampling_by_task"][-1] for r in runs]
             per_example = []
             for log in last:
@@ -969,7 +986,7 @@ def sampling_rows(sampling):
             rows.append(
                 {
                     "sampling": policy,
-                    "strategy": strategy,
+                    "method": method,
                     "examples_processed": int(
                         np.mean(
                             [
