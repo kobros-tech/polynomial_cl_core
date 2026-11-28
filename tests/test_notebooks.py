@@ -164,11 +164,18 @@ def _package_callables(tree):
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
 def test_notebook_calls_pass_only_arguments_the_current_api_accepts(path):
-    """Static check of every call to a package function: keyword names and argument count.
+    """Supplementary static guard: unknown keywords and too many positional arguments.
 
-    It resolves names through the cell's own imports (``from polynomial_cl... import f`` and
-    module aliases such as ``P.plot_cil_tradeoff``); calls on instances and ``**kwargs``
-    unpacking are not checked. It complements, and does not replace, executing the notebook.
+    Covered: calls whose function name is imported by the notebook itself from
+    ``polynomial_cl`` (``from polynomial_cl... import f``) or reached through a module alias
+    imported the same way (``P.plot_cil_tradeoff``). For those calls it checks that every
+    explicit keyword exists in the current signature and that the positional arguments are
+    not more than it takes.
+
+    Not covered: calls on instances (``model.expanded(4)``), ``**kwargs`` unpacking (the
+    keywords inside it are not seen), starred positional arguments, whether every *required*
+    argument is supplied, argument types and values, and names the notebook defines or
+    gets from other libraries. It does not replace executing the notebooks.
     """
     notebook = json.loads(path.read_text(encoding="utf-8"))
     namespace = {}  # imports accumulate over the cells, as in the kernel

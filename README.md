@@ -19,7 +19,7 @@ The project is a continual-learning study first and a machine-learning library s
 
 Class-incremental learning and sequential binary classification under a shifting input distribution are different settings, and results from one must not be presented as results for the other. Conventional joint training (notebook 01) is only a reference point: it sees all data at once, so it has no sequence of experiences and no forgetting.
 
-This README describes the structure, protocols and commands. It records no measured results or research conclusions, with one exception: the degree-control section keeps a single result that is labelled as historical (it comes from an earlier API generation). Results are produced by running the notebooks and experiment scripts and are reviewed in a separate research-results change. This README is the project's only documentation file.
+This README describes the structure, protocols and commands. It records no measured results or research conclusions, with two kinds of exception: the degree-control section quotes figures from earlier executions, labelled historical (they come from an earlier API generation and were not regenerated), and "Cost of a run" quotes timings from a reference environment. Results are produced by running the notebooks and experiment scripts and are reviewed in a separate research-results change. This README is the project's only documentation file.
 
 ## Update methods and earlier names
 
@@ -92,7 +92,7 @@ Only Python, NumPy, Matplotlib and Jupyter are used (no PyTorch / TensorFlow / s
 cd polynomial_cl_core
 python -m venv .venv && source .venv/bin/activate     # optional
 pip install -e ".[dev]"                                # numpy, matplotlib, stable-continual-learning (pinned git commit) + pytest, jupyter, nbformat, nbconvert
-python -m pytest                                       # fast test suite (seconds)
+python -m pytest                                       # fast test suite (about a minute or two)
 python -m pytest -m slow                               # executes both notebooks in a clean kernel (minutes)
 jupyter lab notebooks/                                 # or: jupyter notebook
 ```
@@ -313,7 +313,7 @@ Run the scripts as `python experiments/<name>.py` from the repository root. Reus
 
 ## Tests
 
-`python -m pytest` runs the fast suite (a few seconds); `python -m pytest -m slow` additionally executes every notebook top to bottom in a clean kernel (minutes; Split MNIST cells run only if `data/mnist` exists). The same two commands run in CI.
+`python -m pytest` runs the fast suite (about a minute or two); `python -m pytest -m slow` additionally executes every notebook top to bottom in a clean kernel (minutes; Split MNIST cells run only if `data/mnist` exists). The same two commands run in CI.
 
 - Shared and binary code: `test_features` (ordering, counts, the shared enumeration and zero-expansion helpers, output-level expansion invariance for binary and multiclass), `test_binary_features`, `test_binary_expansion` (exact copy, zeros, identical scores and probabilities on train/eval/random/outside inputs, invariant checked every step of the loop), `test_binary_training` (finite-difference gradient, loss decrease, reproducibility, frozen coefficients, zero-init learning, per-coefficient learning rates, preservation tests, preset-override guard), `test_binary_replay`, `test_binary_data`, `test_binary_plotting`.
 - Synthetic data: `test_synthetic_data` (sinusoidal experiences bit-identical to the pre-refactor generator, circular target geometry, reproducibility, independent train/test streams, label noise), `test_joint_studies`.
@@ -323,7 +323,7 @@ Run the scripts as `python experiments/<name>.py` from the repository root. Reus
 - Stable integration and equivalence: `test_stable_integration` and `test_binary_stable_integration` (the trainers call `stable_cl` with the effective rates; no second copy of the mathematics in `src/`), `test_equivalence_multiclass` and `test_equivalence_binary` (golden fixtures in `tests/golden`, recorded from the former implementation and not regenerated).
 - Replay and sampling: `test_replay_sampling` (memory draw and stored-index order, policy-to-sampler mapping, the trainer's injected sampler).
 - Structure: `test_architecture` (import graph without cycles, class-incremental code independent of the binary code, binary/model/trainer code independent of the class-incremental code, entry points not importing each other, no stale imports in source, tests, experiments and notebooks).
-- Workflows: `test_experiment_scripts` (the command-line tools) and `test_notebooks` (every notebook compiles, has unique valid cell ids, is committed without outputs, reads no result file, uses no retired strategy name in its class-incremental cells, passes only arguments the current API accepts, and executes cleanly under `-m slow`).
+- Workflows: `test_experiment_scripts` (the command-line tools) and `test_notebooks` (every notebook compiles, has unique valid cell ids, is committed without outputs, reads no result file, uses no retired strategy name in its class-incremental cells, passes no keyword argument that the imported package functions it calls do not accept, and executes cleanly under `-m slow`).
 
 ## Reproducibility
 
@@ -367,7 +367,7 @@ A candidate is feasible only if, for **every** experience, its seed-mean accurac
 
 ### Historical result of one saved run (Split MNIST, earlier API generation)
 
-This is the only measured result in this README. It was recorded with the earlier API generation, when the relaxed method was called `strategy_b`, and was not regenerated by the C5 documentation change. Only the two methods that still exist are listed; the third configuration of that study (`frozen_old`) was removed with its strategy.
+This record and the transfer figures quoted in the bullets below are historical. They were recorded with the earlier API generation, when the relaxed method was called `strategy_b`, and was not regenerated by the C5 documentation change. Only the two methods that still exist are listed; the third configuration of that study (`frozen_old`) was removed with its strategy.
 
 `python experiments/degree_control.py --dataset split_mnist --output results/degree_control.json`: 10% of the training set held out for validation, selection seeds 0-2, test seeds 3-9, 3 epochs, batch size 128, 200 replay examples per class, 3 reference examples per class, floor 0.5. The run is deterministic; the generated JSON is not part of the repository. The table shows the baseline and the configuration selected as best overall (test seeds, means over 7 seeds).
 
@@ -385,6 +385,6 @@ Notebook 02 (I.7) first checks the mechanism (an all-ones control reproduces the
 - The results are evidence from this experiment of a **plasticity-retention trade-off**: under the acquisition constraint, the selected configurations have lower measured forgetting and slightly lower final accuracy than their baselines. They do not show that degree control improves retention, and lower forgetting is not by itself better continual learning.
 - The floor is permissive. Every selected configuration passes it while learning the second experience 8 to 12 points worse on arrival than its baseline (table above), and both set the degree-2 factor to 0. This experiment cannot separate "retains more" from "learns less strongly"; per-experience arrival accuracy has to be read together with forgetting.
 - The relaxed method (`beta = 0`) preserves its reference logits; the table does not measure old-data retention separately, and its forgetting is still non-zero.
-- Selection ran under class-balanced sampling only. The notebook's I.7 transfer rows (same vectors, `shuffled` sampling, test seeds 3-9) show that the trade-off did not transfer: final accuracy was lower in 7 of 7 seeds for both methods, but forgetting was higher for `ordinary` (0.5045 to 0.5644) and slightly lower only for `relaxed` (0.4281 to 0.4182, lower in 5 of 7 seeds). The trade-off is therefore specific to the balanced protocol and to the base rates chosen for it. These are produced by running the notebook, not stored in a result file.
+- Selection ran under class-balanced sampling only. The notebook's I.7 transfer rows (same vectors, `shuffled` sampling, test seeds 3-9) show that the trade-off did not transfer: final accuracy was lower in 7 of 7 seeds for both methods, but forgetting was higher for `ordinary` (0.5045 to 0.5644) and slightly lower only for `relaxed` (0.4281 to 0.4182, lower in 5 of 7 seeds). The trade-off is therefore specific to the balanced protocol and to the base rates chosen for it. These are produced by running the notebook, not stored in a result file; the figures quoted here are historical in the same sense as the table above.
 - One dataset (Split MNIST with a fixed random projection, `--projection-seed 0`), one set of base rates per method, one floor, selection on three seeds of a 10% validation split. The seven test seeds vary the task plan and shuffling, not the data or the projection. The consistent direction over seeds is not a significance test and not evidence of generalisation. How the result changes with the floor was not studied.
 - No configuration is claimed to be optimal. The selected vectors are what this protocol chose on this validation split.
