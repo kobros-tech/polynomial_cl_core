@@ -7,9 +7,10 @@ import inspect
 
 import numpy as np
 import pytest
+from null_basis_support import null_space_basis
 
 from polynomial_cl.continual import (
-    STRATEGIES,
+    METHODS,
     candidate_vectors,
     make_feature_data,
     make_task_plan,
@@ -37,10 +38,7 @@ from polynomial_cl.continual.features import (
 )
 from polynomial_cl.continual.sampling import DEFAULT_SAMPLING, balanced_batches
 from polynomial_cl.data import make_synthetic_2d
-from polynomial_cl.training.multiclass import (
-    fit_task,
-    null_space_basis,
-)
+from polynomial_cl.training.multiclass import fit_task
 
 EMPTY_X, EMPTY_Y = np.empty((0, 10), np.float32), np.empty(0, np.int64)
 
@@ -53,7 +51,7 @@ def tiny_data():
     return make_feature_data(x_train, y_train, x_test, y_test)
 
 
-def _run(data, strategy="ordinary", seed=2, **kwargs):
+def _run(data, method="ordinary", seed=2, **kwargs):
     tasks, memory = make_task_plan(data.train_y, seed, 4)
     settings = {
         "epochs": 2,
@@ -68,7 +66,7 @@ def _run(data, strategy="ordinary", seed=2, **kwargs):
         tasks,
         memory,
         seed=seed,
-        strategy=strategy,
+        method=method,
         **{**settings, **kwargs},
     )
 
@@ -253,8 +251,8 @@ def test_update_masks_and_group_scale_compose():
     base, scale = step_scale_for(np.array([0.5, 0.25, 0.5, 0.125]), index)
     start = np.random.default_rng(3).normal(size=(10, 10)).astype(np.float32)
     mask = np.ones_like(start)
-    mask[:3, :2] = 0.0  # frozen_old-like: old rows (degree 0 and 1) of old classes
-    mask[3:6, :2] = 0.1  # small_old_lr-like
+    mask[:3, :2] = 0.0  # frozen-old-like: old rows (degree 0 and 1) of old classes
+    mask[3:6, :2] = 0.1  # slowed-old-like
     out = start.copy()
     fit_task(
         out,
@@ -306,10 +304,10 @@ def test_null_projection_keeps_reference_logits_with_group_rates_including_zero(
 
 
 # -------------------------------------------------- run-level behaviour
-def test_equal_rate_vector_reproduces_the_scalar_run_for_every_strategy(tiny_data):
-    for strategy in STRATEGIES:
-        scalar = _run(tiny_data, strategy, learning_rate=0.05)
-        vector = _run(tiny_data, strategy, learning_rate=[0.05] * 4)
+def test_equal_rate_vector_reproduces_the_scalar_run_for_every_method(tiny_data):
+    for method in METHODS:
+        scalar = _run(tiny_data, method, learning_rate=0.05)
+        vector = _run(tiny_data, method, learning_rate=[0.05] * 4)
         assert vector["accuracy_matrix"] == scalar["accuracy_matrix"]
         assert vector["train_loss_by_task"] == scalar["train_loss_by_task"]
         assert vector["per_degree_rates"] and not scalar["per_degree_rates"]
@@ -349,15 +347,8 @@ def test_group_sizes_in_the_diagnostics_count_coefficients_per_degree(tiny_data)
     assert n_coefficients[4] == [1 * 10, 2 * 10, 3 * 10, 4 * 10]  # 10 classes seen
 
 
-def test_old_coefficient_definition_with_rate_vectors(tiny_data):
-    run = _run(tiny_data, "frozen_old", learning_rate=[0.2, 0.2, 0.2, 0.2])
-    trainable = run["degree_diagnostics"]["n_trainable"]
-    # task 1: classes 0-1 are old, so the old rows of both existing groups are frozen
-    assert trainable[1][0] == 1 * 4 - 1 * 2 and trainable[1][1] == 2 * 4 - 2 * 2
-
-
-def test_strategy_b_keeps_reference_logits_with_a_rate_vector(tiny_data):
-    run = _run(tiny_data, "strategy_b", learning_rate=[0.3, 0.0, 0.1, 0.2])
+def test_relaxed_keeps_reference_logits_with_a_rate_vector(tiny_data):
+    run = _run(tiny_data, "relaxed", learning_rate=[0.3, 0.0, 0.1, 0.2])
     assert max(c for c in run["ref_logit_change_by_task"] if c is not None) <= 1e-4
     assert all(row[1] == 0.0 for row in run["degree_diagnostics"]["coef_change_l1"])
 
@@ -448,9 +439,9 @@ def test_no_future_class_is_ever_drawn_and_replay_pools_come_from_old_classes(
             assert min(log["pool_sizes_by_class"][2 * task : seen]) == 12
 
 
-def test_no_replay_pool_is_current_classes_only_under_both_policies(tiny_data):
+def test_replay_false_pool_is_current_classes_only_under_both_policies(tiny_data):
     for sampling in ("shuffled", "class_balanced"):
-        run = _run(tiny_data, "ordinary_no_replay", sampling=sampling)
+        run = _run(tiny_data, replay=False, sampling=sampling)
         log = run["sampling_by_task"][3]
         assert not any(log["pool_sizes_by_class"][:6]) and not any(
             log["samples_drawn_by_class"][:6]
@@ -539,7 +530,7 @@ def test_study_rejects_overlapping_seeds_and_runs_end_to_end(tiny_data):
         tiny_data,
         [0],
         [1, 2],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         samplings=("shuffled", "class_balanced"),
         epochs=1,
         batch_size=16,
@@ -571,28 +562,40 @@ def test_joint_reference_has_no_forgetting_and_is_reproducible(tiny_data):
         run_joint_reference(tiny_data, degree=4)
 
 
-def test_cell_files_are_merged_and_inconsistent_seeds_rejected(tmp_path, tiny_data):
+def _write_cells(tmp_path, tiny_data, methods):
     import json
 
-    from polynomial_cl.continual.degree_study import load_study_cells
-
-    assert load_study_cells(tmp_path) is None
-    for strategy in ("frozen_old", "ordinary"):
+    for method in methods:
         study = run_per_degree_study(
             tiny_data,
             tiny_data,
             [0],
             [1],
-            strategies=(strategy,),
+            methods=(method,),
             samplings=("shuffled",),
             epochs=1,
             batch_size=16,
             memory_per_class=4,
             n_ref_per_class=1,
         )
-        (tmp_path / f"cell_{strategy}.json").write_text(json.dumps(study))
+        (tmp_path / f"cell_{method}.json").write_text(json.dumps(study))
+
+
+def test_cell_files_are_merged_and_inconsistent_seeds_rejected(tmp_path, tiny_data):
+    import json
+
+    from polynomial_cl.continual.degree_study import load_study_cells
+
+    assert load_study_cells(tmp_path) is None
+    _write_cells(tmp_path, tiny_data, ("relaxed", "ordinary"))
     merged = load_study_cells(tmp_path)
-    assert [c["strategy"] for c in merged["cells"]] == ["ordinary", "frozen_old"]
+    assert merged["api_generation"] == "current"
+    assert [c["method"] for c in merged["cells"]] == ["ordinary", "relaxed"]
+    cells = {c["method"]: c for c in merged["cells"]}
+    assert cells["relaxed"]["beta"] == 0.0 and cells["ordinary"]["beta"] is None
+    assert all(
+        c["replay"] is True and c["api_generation"] == "current" for c in cells.values()
+    )
     other = json.loads((tmp_path / "cell_ordinary.json").read_text())
     other["test_seeds"] = [5]
     (tmp_path / "cell_zz.json").write_text(json.dumps(other))
@@ -600,9 +603,154 @@ def test_cell_files_are_merged_and_inconsistent_seeds_rejected(tmp_path, tiny_da
         load_study_cells(tmp_path)
 
 
-def test_strategy_b_trainable_dimension_excludes_zero_rate_directions(tiny_data):
+def test_a_cell_identity_must_be_unique_so_betas_cannot_collide(tmp_path, tiny_data):
+    import json
+
+    from polynomial_cl.continual.degree_study import load_study_cells
+
+    _write_cells(tmp_path, tiny_data, ("relaxed",))
+    clone = json.loads((tmp_path / "cell_relaxed.json").read_text())
+    clone["cells"][0]["beta"] = (
+        0.5  # same (method, sampling), a different configuration
+    )
+    (tmp_path / "cell_relaxed_b05.json").write_text(json.dumps(clone))
+    with pytest.raises(ValueError, match="share the identity"):
+        load_study_cells(tmp_path)
+
+
+LEGACY_CELL = {
+    "strategy": "strategy_b",
+    "sampling": "shuffled",
+    "base_rate": 0.1,
+    "selected": "shared",
+    "pareto": ["shared"],
+    "vectors": {"shared": [0.1, 0.1, 0.1, 0.1]},
+    "runs": {
+        "shared": [{"seed": 3, "strategy": "strategy_b", "final_mean_accuracy": 0.5}]
+    },
+}
+
+
+def _legacy_file(tmp_path, name, cell, **top):
+    import json
+
+    payload = {
+        "selection_seeds": [0],
+        "test_seeds": [1],
+        "selection_rule": "pareto(accuracy, forgetting), max accuracy - forgetting",
+        "cells": [cell],
+        **top,
+    }
+    (tmp_path / name).write_text(json.dumps(payload))
+
+
+def test_the_current_loader_rejects_the_earlier_strategy_vocabulary(tmp_path):
+    from polynomial_cl.continual.degree_study import load_study_cells
+
+    for strategy in ("strategy_b", "ordinary", "frozen_old", "ordinary_no_replay"):
+        _legacy_file(tmp_path, "cell_a.json", {**LEGACY_CELL, "strategy": strategy})
+        with pytest.raises(ValueError, match="load_legacy_study_cells"):
+            load_study_cells(tmp_path)
+
+
+def test_the_current_loader_rejects_an_unknown_method(tmp_path):
+    from polynomial_cl.continual.degree_study import load_study_cells
+
+    cell = {k: v for k, v in LEGACY_CELL.items() if k != "strategy"}
+    _legacy_file(tmp_path, "cell_a.json", {**cell, "method": "strategy_b"})
+    with pytest.raises(ValueError, match="unknown method"):
+        load_study_cells(tmp_path)
+    _legacy_file(tmp_path, "cell_a.json", cell)
+    with pytest.raises(ValueError, match="no 'method'"):
+        load_study_cells(tmp_path)
+
+
+def test_the_legacy_loader_preserves_names_marks_the_generation_and_changes_no_record(
+    tmp_path,
+):
+    import copy
+
+    from polynomial_cl.continual.degree_study import load_legacy_study_cells
+
+    assert load_legacy_study_cells(tmp_path) is None
+    expected = {
+        "ordinary": {"method": "ordinary", "beta": None, "replay": True},
+        "ordinary_no_replay": {"method": "ordinary", "beta": None, "replay": False},
+        "strategy_b": {"method": "relaxed", "beta": 0.0, "replay": True},
+        "small_old_lr": None,
+        "frozen_old": None,
+        "strategy_b_new": None,
+    }
+    for i, strategy in enumerate(expected):
+        _legacy_file(
+            tmp_path,
+            f"cell_{i}.json",
+            {**copy.deepcopy(LEGACY_CELL), "strategy": strategy},
+        )
+    study = load_legacy_study_cells(tmp_path)
+    assert study["api_generation"] == "legacy"
+    from polynomial_cl.continual.strategies import LEGACY_STRATEGY_NAMES
+
+    # names kept, ordered by sampling and then by the historical strategy order
+    assert [c["strategy"] for c in study["cells"]] == list(LEGACY_STRATEGY_NAMES)
+    for cell in study["cells"]:
+        assert cell["api_generation"] == "legacy" and "method" not in cell
+        assert cell["equivalent_current_configuration"] == expected[cell["strategy"]]
+        # every historical field is untouched
+        for key, value in LEGACY_CELL.items():
+            if key != "strategy":
+                assert cell[key] == value
+        assert (
+            cell["runs"]["shared"][0]["strategy"] == "strategy_b"
+        )  # run records as written
+
+
+def test_the_legacy_loader_rejects_current_files_and_unknown_names(tmp_path, tiny_data):
+    from polynomial_cl.continual.degree_study import load_legacy_study_cells
+
+    _write_cells(tmp_path, tiny_data, ("ordinary",))
+    with pytest.raises(ValueError, match="not a legacy study file|load_study_cells"):
+        load_legacy_study_cells(tmp_path)
+    (tmp_path / "cell_ordinary.json").unlink()
+    _legacy_file(tmp_path, "cell_x.json", {**LEGACY_CELL, "strategy": "nope"})
+    with pytest.raises(ValueError, match="unknown legacy strategy"):
+        load_legacy_study_cells(tmp_path)
+
+
+def test_legacy_and_current_results_are_never_mixed_by_the_analysis(
+    tmp_path, tiny_data
+):
+    from polynomial_cl.continual import run_epoch_robustness
+    from polynomial_cl.continual.degree_study import (
+        load_legacy_study_cells,
+        study_pairs,
+        study_rows,
+    )
+
+    _legacy_file(tmp_path, "cell_x.json", LEGACY_CELL)
+    legacy = load_legacy_study_cells(tmp_path)
+    for call in (
+        lambda: study_rows(legacy),
+        lambda: study_pairs(legacy),
+        lambda: run_epoch_robustness(tiny_data, legacy, 2),
+    ):
+        with pytest.raises(ValueError, match="current-generation"):
+            call()
+    # a current study that was given a legacy cell is refused as well
+    current_cells = tmp_path / "cur"
+    current_cells.mkdir()
+    _write_cells(current_cells, tiny_data, ("ordinary",))
+    from polynomial_cl.continual.degree_study import load_study_cells
+
+    mixed = load_study_cells(current_cells)
+    mixed["cells"] = [*mixed["cells"], legacy["cells"][0]]
+    with pytest.raises(ValueError, match="current-generation"):
+        study_rows(mixed)
+
+
+def test_relaxed_trainable_dimension_excludes_zero_rate_directions(tiny_data):
     rates = [0.3, 0.0, 0.1, 0.2]  # the linear group never moves
-    run = _run(tiny_data, "strategy_b", learning_rate=rates)
+    run = _run(tiny_data, "relaxed", learning_rate=rates)
     index = degree_of_feature(2, 3)
     counts = [3, 6, 10, 10, 10]  # features per experience (degrees 1, 2, 3, 3, 3)
     naive_overcounts = False
@@ -619,7 +767,7 @@ def test_strategy_b_trainable_dimension_excludes_zero_rate_directions(tiny_data)
             assert trainable // n_seen <= null_dim
             naive_overcounts |= trainable < null_dim * n_seen
     # without zero rates nothing changes: the effective dimension is the null dimension
-    full = _run(tiny_data, "strategy_b", learning_rate=0.05)
+    full = _run(tiny_data, "relaxed", learning_rate=0.05)
     assert full["n_trainable_by_task"][1:] == [
         d * 2 * (t + 1) for t, d in enumerate(full["null_dim_by_task"]) if t
     ]
@@ -683,7 +831,7 @@ def test_study_cells_report_validation_metrics_and_the_pareto_front(tiny_data):
         tiny_data,
         [0],
         [1],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         samplings=("shuffled",),
         epochs=1,
         batch_size=16,
@@ -700,21 +848,8 @@ def test_study_cells_report_validation_metrics_and_the_pareto_front(tiny_data):
     assert "forgetting" in study["selection_rule"]
 
 
-# ----------------------------------------------------------- strategy_b_new
-def test_strategy_b_new_freezes_old_coefficients_and_keeps_reference_logits(tiny_data):
-    run = _run(tiny_data, "strategy_b_new", n_ref_per_class=1)
-    # features per experience are 3, 6, 10, 10, 10: experiences 4 and 5 add no feature rows,
-    # so no old-class output can move at all (old coefficients frozen, no new rows to use)
-    assert run["old_logit_change_by_task"][3] == 0.0
-    assert run["old_logit_change_by_task"][4] == 0.0
-    assert max(c for c in run["ref_logit_change_by_task"] if c is not None) <= 1e-4
-    assert run["null_dim_by_task"][0] is None  # nothing to preserve in experience 1
-    unconstrained = _run(tiny_data, "strategy_b", n_ref_per_class=1)
-    # strategy_b may still move old coefficients (inside the null space); b_new may not
-    assert unconstrained["old_logit_change_by_task"][3] > 0.0
-
-
-def test_strategy_b_new_updates_match_the_documented_subspaces():
+# ------------------------------------- fit_task: null_groups and update_scale (retained C2/C3 API)
+def test_null_groups_with_update_scale_match_the_documented_subspaces():
     rng = np.random.default_rng(5)
     count, old_rows, old_classes, n_seen = 10, 6, 2, 4
     x = rng.normal(size=(30, count)).astype(np.float32)
@@ -779,19 +914,6 @@ def test_null_groups_are_validated_and_exclusive_with_null_basis():
         )
 
 
-def test_strategy_b_new_with_rate_vector_keeps_references_and_zero_group_frozen(
-    tiny_data,
-):
-    run = _run(
-        tiny_data,
-        "strategy_b_new",
-        n_ref_per_class=1,
-        learning_rate=[0.3, 0.0, 0.1, 0.2],
-    )
-    assert max(c for c in run["ref_logit_change_by_task"] if c is not None) <= 1e-4
-    assert all(row[1] == 0.0 for row in run["degree_diagnostics"]["coef_change_l1"])
-
-
 def test_epoch_robustness_reuses_selected_vectors_without_reselecting(tiny_data):
     from polynomial_cl.continual import run_epoch_robustness
 
@@ -800,7 +922,7 @@ def test_epoch_robustness_reuses_selected_vectors_without_reselecting(tiny_data)
         tiny_data,
         [0],
         [1, 2],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         samplings=("shuffled",),
         epochs=1,
         batch_size=16,
@@ -855,7 +977,7 @@ def test_progress_log_reports_stages_and_every_run(tiny_data):
         tiny_data,
         [0],
         [1],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         samplings=("shuffled",),
         epochs=1,
         batch_size=16,
@@ -875,28 +997,17 @@ def test_progress_log_reports_stages_and_every_run(tiny_data):
         assert expected in text
 
 
-def test_strategy_b_variants_report_both_null_space_dimensions(tiny_data):
-    shared = _run(tiny_data, "strategy_b", n_ref_per_class=1)
+def test_relaxed_reports_equal_null_space_dimensions_for_old_and_new_columns(tiny_data):
+    shared = _run(tiny_data, "relaxed", n_ref_per_class=1)
     assert shared["null_dim_by_task"][0] is None
     assert shared["null_dim_new_class_columns_by_task"][0] is None
-    # strategy_b uses one basis for every column, so the two reported dimensions agree
+    # one basis for every column, so the two reported dimensions agree
     assert (
         shared["null_dim_by_task"][1:]
         == shared["null_dim_new_class_columns_by_task"][1:]
     )
-    new = _run(tiny_data, "strategy_b_new", n_ref_per_class=1)
-    old_dim, new_dim = (
-        new["null_dim_by_task"],
-        new["null_dim_new_class_columns_by_task"],
-    )
-    assert old_dim[0] is None and new_dim[0] is None
-    # experiences 4 and 5 add no feature rows: nothing is left for the old-class outputs,
-    # while the new classes' columns keep a free subspace
-    assert old_dim[3] == old_dim[4] == 0
-    assert new_dim[3] > 0 and new_dim[4] > 0
-    for other in ("ordinary", "frozen_old"):
-        run = _run(tiny_data, other)
-        assert all(v is None for v in run["null_dim_new_class_columns_by_task"])
+    run = _run(tiny_data, "ordinary")
+    assert all(v is None for v in run["null_dim_new_class_columns_by_task"])
 
 
 def test_degree_group_rows_show_a_zero_rate_group_as_untrainable_and_unchanged():

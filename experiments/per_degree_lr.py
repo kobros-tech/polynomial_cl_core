@@ -2,14 +2,14 @@
 # SPDX-License-Identifier: MIT
 """Split MNIST: sampling-policy comparison and the per-degree learning-rate study -> JSON.
 
-``--experiment sampling``: every strategy under ``shuffled`` and ``class_balanced`` sampling
+``--experiment sampling``: every method under ``shuffled`` and ``class_balanced`` sampling
 with one shared rate (test data, seeds ``--seeds``).
 
 ``--experiment epochs``: re-runs the shared reference and the selected vector of every cell found
 in ``--cells-dir`` (``cell_*.json`` from the per-degree experiment) at ``--epochs`` epochs on the
 test seeds, without re-selecting rates.
 
-``--experiment per-degree``: for every (strategy, sampling) the rate vectors are selected on a
+``--experiment per-degree``: for every (method, sampling) the rate vectors are selected on a
 validation split with ``--select-seeds`` and then run on the test set with ``--test-seeds``
 (disjoint). See polynomial_cl/continual/degree_study.py for the protocol; this script
 only parses arguments and writes the result.
@@ -19,7 +19,12 @@ import argparse
 import json
 from pathlib import Path
 
-from common import add_dataset_arguments, add_diagnostics_argument, load_dataset
+from common import (
+    add_dataset_arguments,
+    add_diagnostics_argument,
+    add_update_arguments,
+    load_dataset,
+)
 
 from polynomial_cl.continual import (
     holdout_split,
@@ -33,8 +38,8 @@ from polynomial_cl.continual.experiment import (
     BATCH_SIZE,
     EPOCHS,
     MEMORY_PER_CLASS,
+    METHODS,
     N_REF_PER_CLASS,
-    STRATEGIES,
 )
 from polynomial_cl.continual.sampling import SAMPLING_POLICIES
 
@@ -46,9 +51,7 @@ def main():
         "--experiment", choices=("sampling", "per-degree", "epochs"), required=True
     )
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument(
-        "--strategies", nargs="+", default=list(STRATEGIES), choices=STRATEGIES
-    )
+    p.add_argument("--methods", nargs="+", default=list(METHODS), choices=METHODS)
     p.add_argument(
         "--samplings",
         nargs="+",
@@ -80,6 +83,7 @@ def main():
     p.add_argument("--memory-per-class", type=int, default=MEMORY_PER_CLASS)
     p.add_argument("--n-ref-per-class", type=int, default=N_REF_PER_CLASS)
     add_diagnostics_argument(p)
+    add_update_arguments(p)
     args = p.parse_args()
     if min(args.epochs, args.batch_size, args.memory_per_class) < 1:
         p.error("epochs, batch-size and memory-per-class must be positive")
@@ -94,6 +98,8 @@ def main():
         "memory_per_class": args.memory_per_class,
         "n_ref_per_class": args.n_ref_per_class,
         "diagnostics": args.diagnostics,
+        "beta": args.beta,
+        "replay": args.replay,
     }
 
     def log(message):
@@ -106,7 +112,7 @@ def main():
             data,
             args.seeds,
             policies=args.samplings,
-            strategies=args.strategies,
+            methods=args.methods,
             learning_rate=args.lr,
             log=log,
             **settings,
@@ -122,7 +128,7 @@ def main():
             batch_size=args.batch_size,
             memory_per_class=args.memory_per_class,
             n_ref_per_class=args.n_ref_per_class,
-            strategies=args.strategies,
+            methods=args.methods,
             samplings=args.samplings,
             diagnostics=args.diagnostics,
             log=log,
@@ -134,12 +140,12 @@ def main():
             make_feature_data(train_x, train_y, test_x, test_y),
             args.select_seeds,
             args.test_seeds,
-            strategies=args.strategies,
+            methods=args.methods,
             samplings=args.samplings,
             min_current_accuracy=args.min_current_accuracy,
             log=log,
             progress=lambda c: print(
-                f"{c['sampling']:15s} {c['strategy']:20s} base={c['base_rate']:g} "
+                f"{c['sampling']:15s} {c['method']:20s} base={c['base_rate']:g} "
                 f"selected={c['selected']} pareto={c['pareto']}",
                 flush=True,
             ),

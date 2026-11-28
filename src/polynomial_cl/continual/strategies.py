@@ -1,22 +1,29 @@
 # Copyright (c) 2026 Mohamed Alkobrosli
 # SPDX-License-Identifier: MIT
 
-"""Update restrictions of the six class-incremental strategies (NumPy only).
+"""Update methods of the class-incremental experiments (NumPy only).
 
-A strategy decides which coefficients may move during one experience and how far:
+A *method* decides how the gradient of one experience is turned into a step:
 
-* ``ordinary`` / ``ordinary_no_replay``: nothing is restricted (the latter also has no replay,
-  which is decided by the training loop in ``experiment.py``);
-* ``small_old_lr`` / ``frozen_old``: coefficients whose feature row *and* class column already
-  existed take a step scaled by ``OLD_LR_FACTOR`` / 0;
-* ``strategy_b``: every coefficient may move, but only inside the null space of the design
-  matrix of a few stored reference inputs per old class (their logits stay unchanged to first
-  order, nowhere else is anything guaranteed);
-* ``strategy_b_new``: old coefficients are frozen and the new ones move inside that null space,
-  with a separate basis for the old-class columns and for the new-class columns.
+* ``ordinary``: the rate-weighted step ``D G`` (``stable_cl.ordinary_step``); nothing is
+  restricted;
+* ``relaxed``: the relaxed null-space step ``D^(1/2) [P + beta (I - P)] D^(1/2) G``
+  (``stable_cl.relaxed_step``), where ``P`` projects onto the null space of the design matrix
+  of a few stored reference inputs per old class. ``beta = 0`` (the default) keeps those
+  logits unchanged to first order and nowhere else is anything guaranteed; ``beta = 1`` is
+  the ordinary step.
 
-``update_restrictions`` builds these constraints for one experience. The training loop, the
+Whether replay examples are added to the training set is **not** a method: it is the
+protocol parameter ``replay`` of ``run_condition``.
+
+``update_restrictions`` builds the constraints of one experience. The null-space basis does
+not depend on ``beta``, so ``beta`` is applied by ``fit_task`` only. The training loop, the
 step-size scaling and the indicators stay in ``run_condition``.
+
+The pre-C4 strategies ``frozen_old``, ``small_old_lr``, ``strategy_b_new`` and
+``ordinary_no_replay`` were removed; the ``strategy_b`` of earlier results is
+``method="relaxed", beta=0.0``. ``fit_task`` keeps its low-level ``update_scale`` and
+``null_groups`` arguments (covered by the C2 fixtures); no method produces them any more.
 """
 
 from __future__ import annotations
@@ -24,19 +31,18 @@ from __future__ import annotations
 from typing import NamedTuple
 
 import numpy as np
+import stable_cl
 
-from ..training.multiclass import null_space_basis
 from .replay import stored_indices
 
-# Update rules compared on the ``expanding`` schedule (same definitions as the binary
-# experiments in polynomial_cl.binary.experiment, but the code is independent). A coefficient
-# is "old" if it existed before the current experience: its feature row was already present
-# AND its class column was already introduced. New feature rows and the new classes'
-# columns always train freely.
-# ``strategy_b`` is the binary ``strategy_b_all`` (every coefficient may move inside the null
-# space of the reference inputs); ``strategy_b_new`` is the binary ``strategy_b_new``: old
-# coefficients are frozen and only new ones move, also inside that null space.
-STRATEGIES = (
+METHODS = ("ordinary", "relaxed")
+N_REF_PER_CLASS = (
+    3  # relaxed: reference inputs per old class (first stored replay examples)
+)
+
+# Names of earlier API generations. They are never accepted by the current API; the legacy
+# study loader reads them (see degree_study.load_legacy_study_cells).
+LEGACY_STRATEGY_NAMES = (
     "ordinary",
     "ordinary_no_replay",
     "small_old_lr",
@@ -44,74 +50,77 @@ STRATEGIES = (
     "strategy_b",
     "strategy_b_new",
 )
-OLD_LR_FACTOR = 0.1
-N_REF_PER_CLASS = (
-    3  # strategy_b: reference inputs per old class (first stored replay examples)
-)
+
+
+def check_method(method) -> str:
+    """Return ``method`` if it is a current method, else raise ``ValueError``."""
+    if method not in METHODS:
+        hint = (
+            " (an earlier API generation: relaxed with beta=0 replaces strategy_b, "
+            "replay=False replaces ordinary_no_replay; old results load through "
+            "load_legacy_study_cells)"
+            if method in LEGACY_STRATEGY_NAMES
+            else ""
+        )
+        raise ValueError(f"unknown method: {method!r}; expected one of {METHODS}{hint}")
+    return method
+
+
+def check_beta(beta, method="relaxed") -> float:
+    """Validate ``beta`` in [0, 1]; ``method='ordinary'`` has no beta and accepts only 0."""
+    if isinstance(beta, (bool, np.bool_)) or not isinstance(
+        beta, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("beta must be a real number")
+    beta = float(beta)
+    if not 0.0 <= beta <= 1.0:  # also rejects NaN
+        raise ValueError("beta must be in [0, 1]")
+    if method == "ordinary" and beta != 0.0:
+        raise ValueError(
+            "beta applies to method='relaxed' only (relaxed with beta=1 is the ordinary "
+            "update)"
+        )
+    return beta
 
 
 class UpdateRestrictions(NamedTuple):
     """What ``fit_task`` receives: any of the four fields may be None (unrestricted)."""
 
-    scale: np.ndarray | None  # per-coefficient step multiplier, shape of the weights
+    scale: (
+        np.ndarray | None
+    )  # per-coefficient step multiplier (no current method sets it)
     null_basis: np.ndarray | None  # one null-space basis shared by every output column
-    refs: np.ndarray | None  # indices of the reference inputs behind the null space(s)
-    null_groups: (
-        list | None
-    )  # [(column slice, basis)] with a separate basis per column group
+    refs: np.ndarray | None  # indices of the reference inputs behind the null space
+    null_groups: list | None  # [(column slice, basis)] (no current method sets it)
 
 
 def update_restrictions(
-    strategy,
+    method,
     *,
-    weights_shape,
-    old_rows,
     old_classes,
-    n_seen,
     count,
     task,
     train_x,
     memory_indices,
     n_ref_per_class,
     step_scale,
+    base_rate=1.0,
 ) -> UpdateRestrictions:
-    """Constraints of ``strategy`` for experience ``task`` (0-based).
+    """Constraints of ``method`` for experience ``task`` (0-based).
 
-    ``old_rows`` / ``old_classes`` are the feature rows and class columns that existed before
-    this experience; ``step_scale`` (or None) is the per-feature step multiplier that is also
-    applied to the reference design, so the null space is that of the effective update.
+    ``old_classes`` are the class columns that existed before this experience; ``step_scale``
+    (or None) is the per-feature step multiplier ``m`` and ``base_rate`` the learning-rate
+    factor ``eta``. The null space is that of the reference design scaled by the effective
+    rates ``d = eta * m`` (float64), as in ``stable_cl``; it does not depend on the positive
+    factor ``eta``, which is passed for completeness, nor on ``beta``.
     """
-    scale = null_basis = refs = null_groups = None
-    if strategy in ("frozen_old", "small_old_lr"):
-        scale = np.ones(weights_shape, np.float32)
-        scale[:old_rows, :old_classes] = (
-            0.0 if strategy == "frozen_old" else OLD_LR_FACTOR
-        )
-    elif strategy == "strategy_b_new" and task:
-        scale = np.ones(weights_shape, np.float32)
-        scale[:old_rows, :old_classes] = 0.0
-        refs = stored_indices(memory_indices, old_classes, n_ref_per_class)
-        ref_design = train_x[refs, :count]
-        if step_scale is not None:
-            ref_design = ref_design * np.sqrt(step_scale)
-        # Old-class columns may only move through the NEW feature rows; the null space is
-        # taken inside those rows. New-class columns see every row (nothing there is old),
-        # as in strategy_b, so reference inputs also keep their new-class logits.
-        rows = np.arange(old_rows, count)
-        old_basis = np.zeros((count, 0), np.float32)
-        if len(rows):
-            old_basis = np.zeros(
-                (count, null_space_basis(ref_design[:, rows]).shape[1]), np.float32
-            )
-            old_basis[rows] = null_space_basis(ref_design[:, rows])
-        null_groups = [
-            (slice(0, old_classes), old_basis),
-            (slice(old_classes, n_seen), null_space_basis(ref_design)),
-        ]
-    elif strategy == "strategy_b" and task:
-        refs = stored_indices(memory_indices, old_classes, n_ref_per_class)
-        ref_design = train_x[refs, :count]
-        if step_scale is not None:
-            ref_design = ref_design * np.sqrt(step_scale)
-        null_basis = null_space_basis(ref_design)
-    return UpdateRestrictions(scale, null_basis, refs, null_groups)
+    check_method(method)
+    if method == "ordinary" or not task:
+        return UpdateRestrictions(None, None, None, None)
+    rates = np.full(count, float(base_rate))
+    if step_scale is not None:
+        rates = rates * np.asarray(step_scale, dtype=np.float64)
+    refs = stored_indices(memory_indices, old_classes, n_ref_per_class)
+    ref_design = train_x[refs, :count].astype(np.float64)
+    null_basis = stable_cl.null_basis(ref_design, rates).astype(np.float32)
+    return UpdateRestrictions(None, null_basis, refs, None)

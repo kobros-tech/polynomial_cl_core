@@ -6,8 +6,15 @@ build-backend = "setuptools.build_meta"
 name = "polynomial-cl"
 version = "0.1.0"
 description = "Research instrument: incremental polynomial feature expansion for continual learning (NumPy only)"
-requires-python = ">=3.9"
-dependencies = ["numpy", "matplotlib"]
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "matplotlib",
+    # The mathematical update lives in the stable package; pinned to an immutable commit
+    # (merge of S3, relative tolerance). Change the SHA only together with a review of the
+    # update's numerics (see tests/test_stable_integration.py).
+    "stable-continual-learning @ git+https://github.com/kobros-tech/stable_continual_learning_package.git@b6dbd86c3fc76f888c5c69167ed09ac03cc34a5d",
+]
 
 [project.optional-dependencies]
 dev = ["pytest", "jupyter", "nbformat", "nbconvert", "ipykernel"]
@@ -17,7 +24,7 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py39"
+target-version = "py311"
 src = ["src", "."]
 extend-exclude = ["notebooks", "results", "data"]
 
@@ -25,7 +32,9 @@ extend-exclude = ["notebooks", "results", "data"]
 # Pyflakes, pycodestyle, isort, flake8-bugbear, pyupgrade and flake8-comprehensions.
 select = ["E", "F", "W", "I", "B", "UP", "C4"]
 # Long comment and docstring lines are left to the author; ruff-format wraps code.
-ignore = ["E501"]
+# B905 (zip without strict=) only applies from Python 3.10, so it appeared with the py311
+# target; adding strict= to the existing calls is not part of the stable integration.
+ignore = ["E501", "B905"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["polynomial_cl", "experiments"]

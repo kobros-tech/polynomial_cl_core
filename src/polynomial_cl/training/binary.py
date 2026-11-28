@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import stable_cl
 
 from ..models.binary import (
     PolynomialLogisticModel,
@@ -77,6 +78,13 @@ def train(
                RNG = default_rng(seed)).
     offset     fixed per-sample score added to the model score (f = offset + w.phi(x)).
     null_basis (n_coef, k) matrix; each update step is projected onto its column space.
+
+    The update is that of the ``stable_cl`` package with the diagonal rate ``d = lr * trainable``
+    (float64): the ordinary step ``d * g`` is :func:`stable_cl.ordinary_step`, written inline
+    because that function re-validates its arguments on every call and this loop calls it once
+    per mini-batch; with a ``null_basis`` the step is :func:`stable_cl.relaxed_step` with
+    ``beta = 0``. For the shared rate the basis requires (checked above) that equals the
+    projected step ``lr * N N^T g``.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -141,9 +149,11 @@ def train(
             idx = order[s : s + bs]
             err = sigmoid(off[idx] + phi[idx] @ w) - y[idx]
             grad = phi[idx].T @ err / len(idx)
-            step = lr_vec * grad
-            if null_basis is not None:
-                step = null_basis @ (null_basis.T @ step)
+            if null_basis is None:
+                step = lr_vec * grad  # stable_cl.ordinary_step, inline
+            else:
+                step = stable_cl.relaxed_step(grad[:, None], null_basis, lr_vec, 0.0)
+                step = step[:, 0]
             w -= step
         hist.append(full_loss())
     assert np.array_equal(w[~mask], w0[~mask]), "a frozen coefficient changed"
@@ -159,6 +169,12 @@ def preservation_null_basis(degree, x_ref, trainable=None, rtol=1e-10):
     Any g with coefficients v = N z satisfies g(x_ref) = 0 exactly (to rounding). If the
     constraints use up all degrees of freedom, k = 0 and g cannot learn anything - that is
     a result to report, not something to repair.
+
+    The basis of the trainable columns is ``stable_cl.null_basis`` with unit rates, so the
+    threshold is the relative one, ``rtol * sigma_1`` with ``rtol`` in ``[0, 1)``. It replaces
+    ``rtol * max(sigma_1, 1)``, which differs only when ``sigma_1 < 1`` (for example reference
+    inputs near the origin with the bias frozen) and then treated small but genuine constraints
+    as absent.
     """
     n = n_features(degree)
     mask = np.ones(n, bool) if trainable is None else np.asarray(trainable, bool)
@@ -168,9 +184,7 @@ def preservation_null_basis(degree, x_ref, trainable=None, rtol=1e-10):
         basis_t = np.eye(len(cols))
     else:
         a = polynomial_features(x_ref, degree)[:, cols]
-        _, s, vt = np.linalg.svd(a, full_matrices=True)
-        rank = int(np.sum(s > rtol * max(s[0], 1.0))) if len(s) else 0
-        basis_t = vt[rank:].T
+        basis_t = stable_cl.null_basis(a, np.ones(len(cols)), rtol)
     basis = np.zeros((n, basis_t.shape[1]))
     basis[cols, :] = basis_t
     return basis

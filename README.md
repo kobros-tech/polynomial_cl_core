@@ -4,7 +4,7 @@ A small NumPy-only research instrument for one hypothesis:
 
 > Incremental polynomial feature expansion, combined with appropriate knowledge-preservation mechanisms (replay, per-coefficient update rules), can improve a model's ability to learn **new classes** while retaining what it already knows.
 
-The project is a continual-learning study first and a machine-learning library second. It does **not** assume the answer is yes. Every mechanism (zero-initialised expansion, freezing, per-coefficient learning rates, replay, a preserved old function) can be switched on and off independently, and every score, coefficient and prediction change is recorded.
+The project is a continual-learning study first and a machine-learning library second. It does **not** assume the answer is yes. Every mechanism (zero-initialised expansion, per-feature and per-degree learning rates including zero rates that freeze a group, replay, the relaxed null-space update) can be switched on and off independently, and every score, coefficient and prediction change is recorded.
 
 > This project studies _explicit_ polynomial feature expansion, which is related to polynomial kernels. It does not implement an implicit-kernel SVM.
 
@@ -19,7 +19,43 @@ The project is a continual-learning study first and a machine-learning library s
 
 Class-incremental learning and sequential binary classification under a shifting input distribution are different settings, and results from one must not be presented as results for the other. Conventional joint training (notebook 01) is only a reference point: it sees all data at once, so it has no sequence of experiences and no forgetting.
 
-This README describes the structure, protocols and commands. It deliberately records no measured results or research conclusions: those are produced by running the notebooks and experiment scripts, and are reviewed in a separate research-results change. This README is the project's only documentation file.
+This README describes the structure, protocols and commands. It records no measured results or research conclusions, with two kinds of exception: the degree-control section quotes figures from earlier executions, labelled historical (they come from an earlier API generation and were not regenerated), and "Cost of a run" quotes timings from a reference environment. Results are produced by running the notebooks and experiment scripts and are reviewed in a separate research-results change. This README is the project's only documentation file.
+
+## Update methods and earlier names
+
+The class-incremental code (`polynomial_cl.continual`) has exactly two update methods, `METHODS = ("ordinary", "relaxed")`. They are chosen with `method=` in Python and with `--experiment methods` or `--methods` on the command line.
+
+| method | step | notes |
+| --- | --- | --- |
+| `ordinary` | the rate-weighted gradient step `D G` (`stable_cl.ordinary_step`) | every coefficient moves; takes no `beta` |
+| `relaxed` | `D^(1/2) [P + beta (I - P)] D^(1/2) G` (`stable_cl.relaxed_step`) | `P` projects onto the null space of the design matrix of a few stored reference inputs per old class; `beta` in [0, 1], default 0; `beta = 1` is the ordinary step |
+
+Whether the stored examples of old classes are added to the training set is **not** a method but the protocol option `replay` (`replay=True` by default; `replay=False` or `--no-replay` turns it off). It applies to both methods.
+
+```python
+from polynomial_cl.continual import make_feature_data, make_task_plan, run_condition
+
+data = make_feature_data(train_x, train_y, test_x, test_y)
+# task plan for seed 0 with 200 stored examples per class
+tasks, memory = make_task_plan(data.train_y, 0, 200)
+ordinary = run_condition("expanding", data, tasks, memory, seed=0)
+# relaxed update with the default beta = 0
+relaxed = run_condition("expanding", data, tasks, memory, seed=0, method="relaxed")
+no_replay = run_condition("expanding", data, tasks, memory, seed=0, replay=False)
+```
+
+**Earlier names (historical, not supported).** Before the C4 migration the class-incremental code offered six strategies. Their names are rejected by the current API (`ValueError`) and by the command-line tools (a usage error). The mapping, for reading old results and old notes:
+
+| earlier name | current equivalent |
+| --- | --- |
+| `ordinary` | `method="ordinary"` |
+| `ordinary_no_replay` | `method="ordinary", replay=False` |
+| `strategy_b` | `method="relaxed", beta=0.0` |
+| `small_old_lr`, `frozen_old`, `strategy_b_new` | removed, no equivalent |
+
+Result files written under the earlier vocabulary have a `strategy` field instead of `method`. `load_study_cells` rejects them. `load_legacy_study_cells` reads them unchanged and marks the study `"api_generation": "legacy"`, and the analysis helpers refuse to mix a legacy study with current results. Current records carry `"api_generation": "current"`. The code of the earlier API generation is kept in the git history (tag `legacy-strategies`).
+
+The **binary** module has its own presets with similar names; they are a separate interface and are described under "Supporting experiment: binary sinusoid".
 
 ## Architecture
 
@@ -38,14 +74,15 @@ Binary learning and class-incremental learning are different tasks, but they sha
   training/binary.py           training/multiclass.py
            |                            |
   binary/  sequential binary   continual/  class-incremental learning
-  learning under spatial shift (Split MNIST, six update strategies)
+  learning under spatial shift (Split MNIST, ordinary and relaxed updates)
 ```
 
 - **Shared foundation.** Both models enumerate monomials in the same order, so the features of degree _d_ are a prefix of those of degree _d_ + 1. A model grows by appending zero coefficients, which leaves every existing output unchanged. This expansion invariant is tested on actual outputs for both model types (`tests/test_features.py`, `tests/test_multiclass_model.py`, `tests/test_binary_expansion.py`).
+- **Update mathematics.** The ordinary and relaxed steps and the null-space basis are computed by the `stable_cl` package, pinned to one commit in `pyproject.toml`. Both trainers (`training/multiclass.py`, `training/binary.py`) call it, and `continual/strategies.py` only chooses the reference inputs and builds their design matrix. The source in `src/` has no second copy of that mathematics; the tests keep reference copies of the former code for their equivalence checks.
 - **Binary versus multiclass.** The two models have different outputs, losses and prediction rules and share no trainer or base class. The binary model is a logistic regression on one score; the multiclass model is a softmax head whose prediction only considers the classes introduced so far.
-- **Multiclass and class-incremental learning.** `polynomial_cl.continual` uses the multiclass model and its trainer and never imports binary code (enforced by `tests/test_architecture.py`). The experience sequence, replay memory, update strategies and per-degree learning rates are class-incremental concerns and live there, not in the generic data or model modules.
+- **Multiclass and class-incremental learning.** `polynomial_cl.continual` uses the multiclass model and its trainer and never imports binary code (enforced by `tests/test_architecture.py`). The experience sequence, replay memory, update methods and per-degree learning rates are class-incremental concerns and live there, not in the generic data or model modules.
 - **Synthetic target interface.** `polynomial_cl.data.make_synthetic_dataset(target_function=..., n_samples=..., seed=..., kind=...)` takes the target geometry as an argument. `sinusoidal_target` (`y = 1 iff x2 > 0.5 sin(3 x1)`) is the default everywhere; `circular_target` (a circle of radius 0.7 at the origin) and `make_circular_target(center, radius)` give a different geometry with the same labels convention. A target only says how labels are generated; how experiences are cut from the data belongs to the experiment (`polynomial_cl.binary` cuts vertical strips).
-- **Notebooks.** `notebooks/01_joint_training.ipynb` is the non-continual reference (targets, degree, training budget, Split MNIST joint training). `notebooks/02_continual_learning.ipynb` is the continual-learning study (protocol, expansion invariant, capacity, sampling and replay, the six strategies, per-degree learning rates, Split MNIST across seeds). Each section starts from a research question and states what the executed cells do and do not show.
+- **Notebooks.** `notebooks/01_joint_training.ipynb` is the non-continual reference (targets, degree, training budget, Split MNIST joint training). `notebooks/02_continual_learning.ipynb` is the continual-learning study (protocol, expansion invariant, capacity, sampling and replay, the ordinary and relaxed update methods, per-degree learning rates, degree control, Split MNIST across seeds). Each section starts from a research question and states what the executed cells do and do not show.
 
 ## Setup
 
@@ -54,8 +91,8 @@ Only Python, NumPy, Matplotlib and Jupyter are used (no PyTorch / TensorFlow / s
 ```bash
 cd polynomial_cl_core
 python -m venv .venv && source .venv/bin/activate     # optional
-pip install -e ".[dev]"                                # numpy, matplotlib + pytest, jupyter, nbformat, nbconvert
-python -m pytest                                       # fast test suite (seconds)
+pip install -e ".[dev]"                                # numpy, matplotlib, stable-continual-learning (pinned git commit) + pytest, jupyter, nbformat, nbconvert
+python -m pytest                                       # fast test suite (about a minute or two)
 python -m pytest -m slow                               # executes both notebooks in a clean kernel (minutes)
 jupyter lab notebooks/                                 # or: jupyter notebook
 ```
@@ -66,13 +103,13 @@ Notebooks are committed without outputs (small diffs); run them to regenerate ev
 jupyter nbconvert --to notebook --execute --inplace notebooks/0*.ipynb
 ```
 
-The notebooks call package code only and run their own experiments (reduced where the full study is expensive); they never read result files from `results/`. Notebook 01 is the joint-training reference (synthetic sinusoid and circle targets, degree and training budget, Split MNIST joint training). Notebook 02 is the continual-learning notebook (its configuration cell sets `sampling` explicitly to `class_balanced`, the library default; `shuffled`, the protocol of the earlier experiments, appears only as the explicit contrast in I.4 and in the I.7 transfer check): Part I is class-incremental learning (protocol, expansion invariant, capacity, sampling and replay, the six update strategies, per-degree learning rates, degree control, stability across seeds) and Part II is the separate binary sequential experiment. The Split MNIST cells of both notebooks are skipped, with a message, when `data/mnist` is absent; the command-line tool downloads the archives (see below). Both notebooks fall back to `../src` if the package is not installed.
+The notebooks call package code only and run their own experiments (reduced where the full study is expensive); they never read result files from `results/`. Notebook 01 is the joint-training reference (synthetic sinusoid and circle targets, degree and training budget, Split MNIST joint training). Notebook 02 is the continual-learning notebook (its configuration cell sets `sampling` explicitly to `class_balanced`, the library default; `shuffled`, the protocol of the earlier experiments, appears only as the explicit contrast in I.4 and in the I.7 transfer check): Part I is class-incremental learning (protocol, expansion invariant, capacity, sampling and replay, the ordinary and relaxed update methods, per-degree learning rates, degree control, stability across seeds) and Part II is the separate binary sequential experiment. The Split MNIST cells of both notebooks are skipped, with a message, when `data/mnist` is absent; the command-line tool downloads the archives (see below). Both notebooks fall back to `../src` if `polynomial_cl` itself is not installed; its dependency `stable-continual-learning` must be installed in either case (`pip install -e ".[dev]"` installs both). The _Observed_ blocks in the notebooks are text recorded from earlier executions; the cells do not generate them.
 
 ## Primary research: class-incremental learning
 
 ### Protocol
 
-Ten classes arrive in five experiences of two classes each (`TASK_ORDER`). One ten-output softmax head is trained on the current experience plus a fixed per-class replay memory. During training **and** evaluation only the classes introduced so far compete, so the output weights of future classes are never trained. After each experience the model is evaluated on every experience seen so far, which fills a lower-triangular accuracy matrix; forgetting of an experience is the best accuracy it ever had minus its final accuracy, averaged over experiences 1-4 (the last has no later evaluation). Forgetting is computed by `polynomial_cl.metrics.forgetting`, the same function the binary experiment uses.
+Ten classes arrive in five experiences of two classes each (`TASK_ORDER`). One ten-output softmax head is trained on the current experience plus a fixed per-class replay memory (`replay=True`, the default; see "Update methods and earlier names"). During training **and** evaluation only the classes introduced so far compete, so the output weights of future classes are never trained. After each experience the model is evaluated on every experience seen so far, which fills a lower-triangular accuracy matrix; forgetting of an experience is the best accuracy it ever had minus its final accuracy, averaged over experiences 1-4 (the last has no later evaluation). Forgetting is computed by `polynomial_cl.metrics.forgetting`, the same function the binary experiment uses.
 
 Three conditions share task order, replay indices, seed, optimiser and number of epochs, and differ only in polynomial degree:
 
@@ -135,41 +172,44 @@ Two different mechanisms lower the accuracy on old classes, and the accuracy mat
 
 `old_logit_change_by_task` is the largest change of any old-class logit on old-class test inputs. Large takeover with small flips points to a stability-plasticity imbalance between old and new classes; large flips point to damage to the old function.
 
-### Update rules (`--experiment strategies`, `expanding` schedule)
+### Update methods and replay (`--experiment methods`, `expanding` schedule)
 
-`ordinary` (replay, everything trains), `ordinary_no_replay`, `frozen_old`, `small_old_lr` (old coefficients get 0.1 x the gradient) and `strategy_b` (every gradient is projected onto the null space of the design matrix at `--n-ref-per-class` stored inputs per old class, so the logits at those inputs cannot change). `strategy_b_new` is the binary `strategy_b_new`: old coefficients are frozen as in `frozen_old`, and the old classes' outputs may move only through newly added feature rows, inside the same null space; the new classes' columns use the full null space. A coefficient is _old_ if its feature row existed before the current experience **and** its class column was already introduced; new feature rows and the new classes' columns always train.
+`--experiment methods` runs `ordinary` and `relaxed` on the `expanding` schedule (the default `--experiment conditions` compares the three degree schedules with the ordinary method). `relaxed` projects every gradient onto the null space of the design matrix at `--n-ref-per-class` stored inputs per old class (the first stored replay examples, default 3), in the rate-scaled coordinates, so the logits at those inputs cannot change to first order when `--beta` is 0 (the default); `--beta` in [0, 1] relaxes the constraint and `--beta 1` is the ordinary update. Experience 1 has no old classes and is unrestricted. `--beta` and `--no-replay` apply to `--experiment methods` only; `--no-replay` leaves the stored examples out of the training set for both methods (the relaxed method still takes its reference inputs from the stored memory).
 
 ```bash
-python experiments/class_incremental.py --dataset split_mnist --experiment strategies --diagnostics --output results/split_mnist_strategies.json
-python experiments/class_incremental.py --dataset split_mnist --experiment strategies --n-ref-per-class 10 --diagnostics --output results/split_mnist_b10.json
+python experiments/class_incremental.py --dataset split_mnist --experiment methods --diagnostics --output results/split_mnist_methods.json
+python experiments/class_incremental.py --dataset split_mnist --experiment methods --n-ref-per-class 10 --diagnostics --output results/split_mnist_relaxed_ref10.json
+python experiments/class_incremental.py --dataset split_mnist --experiment methods --beta 0.5 --output results/split_mnist_relaxed_beta05.json
+python experiments/class_incremental.py --dataset split_mnist --experiment methods --no-replay --output results/split_mnist_no_replay.json
 ```
 
-With diagnostics on, every record carries learning indicators that exist for _all_ rules: training loss before and after each experience, L1 size of the update, number of trainable coefficients, and the old-class change, flip and takeover diagnostics above. `null_dim` exists only for the two Strategy B variants and is a constraint diagnostic, not a general learning indicator. It is the free dimension for the old-class output columns (`strategy_b`: one basis shared by every column; `strategy_b_new`: the dimension left in the newly added feature rows, which is 0 in an experience that adds none), and `null_dim_new_class_columns` is the free dimension for the new classes' columns. `n_trainable` counts the directions that can actually move after the learning-rate vector is applied (zero-rate groups excluded).
+With diagnostics on, every record carries learning indicators that exist for both methods: training loss before and after each experience, L1 size of the update, number of trainable coefficients, and the old-class change, flip and takeover diagnostics above. `null_dim` exists only for the relaxed method and is a constraint diagnostic, not a general learning indicator: it is the dimension of the allowed update space, with one basis shared by every output column (so `null_dim_new_class_columns` repeats it). `n_trainable` counts the directions that can actually move after the learning-rate vector is applied (zero-rate groups excluded).
 
 ### Per-feature learning rates and validated rate selection
 
-`--feature-power p` gives feature i the step size `lr * (max_rms / rms_i) ** p` (p = 0: one shared rate; p = 1: diagonal preconditioning). `--validation-fraction 0.1` evaluates on a held-out part of the training data instead of the test set. `experiments/rate_selection.py` sweeps `(p, lr)` on that split, picks the best cell for each condition (or rule, with `--experiment strategies`) by validation accuracy only, and then reports the test result for the selected cells:
+`--feature-power p` gives feature i the step size `lr * (max_rms / rms_i) ** p` (p = 0: one shared rate; p = 1: diagonal preconditioning). `--validation-fraction 0.1` evaluates on a held-out part of the training data instead of the test set. `experiments/rate_selection.py` sweeps `(p, lr)` on that split, picks the best cell for each condition (or method, with `--experiment methods`) by validation accuracy only, and then reports the test result for the selected cells:
 
 ```bash
 python -u experiments/rate_selection.py --dataset split_mnist --output results/rate_selection_conditions.json   # minutes
-python -u experiments/rate_selection.py --dataset split_mnist --experiment strategies --output results/rate_selection_strategies.json
+python -u experiments/rate_selection.py --dataset split_mnist --experiment methods --output results/rate_selection_methods.json
 ```
 
 The seeds used for selection (`--select-seeds`, default 0 1) and for the reported test result (`--test-seeds`, default 2-6) must be disjoint: the script refuses overlapping sets, because otherwise the same stochastic runs would both choose the rates and be reported as the test estimate. Check where each selected cell lies in the grid: a selection on the boundary (`--powers`, `--lrs`) means the optimum may be outside it; widen the grid and rerun.
 
 ### Sampling policy and per-degree learning rates
 
-Two further mechanisms are available for every update rule (`polynomial_cl.continual`).
+Two further mechanisms are available for both update methods (`polynomial_cl.continual`).
 
-**Sampling policy** (`sampling="class_balanced"` or `"shuffled"`; the default is `polynomial_cl.continual.sampling.DEFAULT_SAMPLING`, `class_balanced`, and the command-line tools take `--sampling`). `shuffled` is the behaviour of the earlier experiments: current and replay examples are shuffled together, so in the last experience a new class contributes about 5,900 examples per class against 200 stored for an old class. Pass `sampling="shuffled"` or `--sampling shuffled` to reproduce those runs; notebook 02 runs class-balanced throughout and uses `shuffled` only where it contrasts the two policies. The default was set from the paired comparison of `--experiment sampling` below (same seeds, strategies, rates and replay memory), and the joint-training reference is unaffected (it has no replay). `class_balanced` builds every batch with (almost) equal numbers of every class seen so far; each class is read through its own shuffled cycle, a class with fewer examples than its share is repeated and never padded from another class, and classes with no examples (no replay) do not take part. Both policies make the same number of updates per epoch and use the same task plan and memory; the test set is never used. Every record stores the pool size, the number of examples actually drawn and the mean batch composition per class (`sampling_by_task`).
+**Sampling policy** (`sampling="class_balanced"` or `"shuffled"`; the default is `polynomial_cl.continual.sampling.DEFAULT_SAMPLING`, `class_balanced`, and the command-line tools take `--sampling`). `shuffled` is the behaviour of the earlier experiments: current and replay examples are shuffled together, so in the last experience a new class contributes about 5,900 examples per class against 200 stored for an old class. Pass `sampling="shuffled"` or `--sampling shuffled` to reproduce those runs; notebook 02 runs class-balanced throughout and uses `shuffled` only where it contrasts the two policies. The default was set from the paired comparison of `--experiment sampling` below (same seeds, methods, rates and replay memory), and the joint-training reference is unaffected (it has no replay). `class_balanced` builds every batch with (almost) equal numbers of every class seen so far; each class is read through its own shuffled cycle, a class with fewer examples than its share is repeated and never padded from another class, and classes with no examples (no replay) do not take part. Both policies make the same number of updates per epoch and use the same task plan and memory; the test set is never used. Every record stores the pool size, the number of examples actually drawn and the mean batch composition per class (`sampling_by_task`).
 
-**Per-degree learning rates** (`learning_rate=` a scalar or a vector). This is a different mechanism from `feature_power`, which scales the step of every _individual feature_ by its RMS value; the per-degree vector sets one step size per degree _group_. Neither decides which polynomial dimensions exist (that is the degree schedule), and the two cannot be combined: setting both is rejected. The vector has one entry per polynomial degree group and position k is degree k (0: constant, 1: linear, 2: quadratic, 3: cubic); entries must be finite and non-negative, 0 freezes the group, and an all-zero vector is rejected. All groups train together in one run with their own rate in every update. A group that appears through expansion uses its own entry from the first update. The vector composes with update masks (`small_old_lr`, `frozen_old`) and with Strategy B, whose null-space projection is taken in the rate-scaled coordinates so the reference logits stay fixed; it cannot be combined with `--feature-power`, which is a different mechanism (a step size per _feature_ derived from the measured feature scale). The binary trainer's `_as_vector` is per _coefficient_ and is unrelated. Each record carries `degree_diagnostics`: per experience and degree group the rate, coefficient and trainable counts, raw-gradient and applied-step size, actual coefficient change (L1 and relative), the group's logit contribution and its contribution to old-class logit change.
+**Per-degree learning rates** (`learning_rate=` a scalar or a vector). This is a different mechanism from `feature_power`, which scales the step of every _individual feature_ by its RMS value; the per-degree vector sets one step size per degree _group_. Neither decides which polynomial dimensions exist (that is the degree schedule), and the two cannot be combined: setting both is rejected. The vector has one entry per polynomial degree group and position k is degree k (0: constant, 1: linear, 2: quadratic, 3: cubic); entries must be finite and non-negative, 0 freezes the group, and an all-zero vector is rejected. All groups train together in one run with their own rate in every update. A group that appears through expansion uses its own entry from the first update. The vector composes with the relaxed method, whose null-space projection is taken in the rate-scaled coordinates so the reference logits stay fixed (the ordinary method simply uses the rates); it cannot be combined with `--feature-power`, which is a different mechanism (a step size per _feature_ derived from the measured feature scale). The binary trainer's `_as_vector` is per _coefficient_ and is unrelated. Each record carries `degree_diagnostics`: per experience and degree group the rate, coefficient and trainable counts, raw-gradient and applied-step size, actual coefficient change (L1 and relative), the group's logit contribution and its contribution to old-class logit change.
 
 ```bash
 python experiments/per_degree_lr.py --dataset split_mnist --experiment sampling --output results/per_degree/sampling_e3_lr0.1.json
-# one JSON per (strategy, sampling), the full study (notebook 02 runs a reduced version itself and does not read these files). The whole study, resumable (skips finished cells):
+# one JSON per (method, sampling), the full study (notebook 02 runs a reduced version itself and does not read these files). The whole study, resumable (skips finished cells):
 bash experiments/run_per_degree_study.sh
-python experiments/per_degree_lr.py --dataset split_mnist --experiment per-degree --strategies ordinary --samplings class_balanced --output results/per_degree/cell_ordinary_class_balanced.json
+python experiments/per_degree_lr.py --dataset split_mnist --experiment per-degree --methods ordinary --samplings class_balanced --output results/per_degree/cell_ordinary_class_balanced.json
+python experiments/per_degree_lr.py --dataset split_mnist --experiment per-degree --methods ordinary --samplings class_balanced --no-replay --output results/per_degree_no_replay/cell_ordinary_class_balanced.json
 ```
 
 Protocol of the per-degree study: every candidate is measured on a 10% validation split (seeds 0-2) for final mean accuracy, mean forgetting and newest-experience accuracy, so accuracy alone never decides. The shared rate is chosen from {0.01, 0.03, 0.1, 0.3, 1, 3, 10, 30}; one degree group at a time is then made 0.25x, 0.5x, 2x or 4x of it; one follow-up vector takes each group's best factor; and all vectors are run on the test set with disjoint seeds 3-9. The Pareto front on (accuracy, forgetting) is recorded for every cell; where one vector is needed, the front member with the largest accuracy minus forgetting is marked `selected` (optionally with a floor `--min-current-accuracy` on newest-experience accuracy). `selected` is a convenience for reading results, not a claim of optimality. Joint (shuffled, all-class) training on the same features is available as `run_joint_reference` and is shown in notebook 01; it has no forgetting.
@@ -200,7 +240,9 @@ python experiments/joint_training.py --target circular --binary-degrees 1 2 3 --
 python experiments/joint_training.py --experiment ten_class --dataset split_mnist --output results/joint_split_mnist.json
 ```
 
-### Strategies (`make_config(name)`)
+### Binary presets (`make_config(name)`)
+
+These presets belong to the binary module (`polynomial_cl.binary.STRATEGIES`). They are independent of the class-incremental `method`, `beta` and `replay` interface and are not accepted by it; the null-space step of the `strategy_b_*` presets is computed by `stable_cl`.
 
 | name | meaning |
 | --- | --- |
@@ -249,16 +291,19 @@ src/polynomial_cl/
   continual/        CLASS-INCREMENTAL learning (never imports the binary code)
     features.py     degree-balanced float32 scaling of the shared monomials
     experiment.py   protocol, conditions, indicators, summaries, joint reference
-    strategies.py   update restrictions of the six strategies (masks and null spaces)
+    strategies.py   the two update methods (METHODS), beta validation, reference inputs and the
+                    null-space restrictions handed to the trainer (the math is stable_cl's)
+    degree_control.py degree-control candidates, acquisition constraint, selection rule
     degree_rates.py per-degree rate vectors (validation, degree of every feature)
     replay.py       replay memory: per-class draw and the stored indices every use reads
     sampling.py     shuffled / class-balanced mini-batch policies handed to the trainer
-    degree_study.py sampling comparison and the validated per-degree rate study
+    degree_study.py sampling comparison, the validated per-degree rate study, current and
+                    legacy study loaders
   plotting/         synthetic.py (binary plots), continual.py (CIL plots); imported on demand
 experiments/        command-line entry points (argument parsing, configuration, writing JSON);
                     common.py holds the argument/dataset helpers they share:
                     class_incremental.py, rate_selection.py, per_degree_lr.py,
-                    synthetic_degree_ablation.py, joint_training.py, run_per_degree_study.sh
+                    degree_control.py, synthetic_degree_ablation.py, joint_training.py, run_per_degree_study.sh
 notebooks/          01 joint training (reference); 02 continual learning: Part I class-incremental
                     (primary), Part II binary sequential learning (supporting, not CIL)
 tests/              see below
@@ -268,16 +313,17 @@ Run the scripts as `python experiments/<name>.py` from the repository root. Reus
 
 ## Tests
 
-`python -m pytest` runs the fast suite (a few seconds); `python -m pytest -m slow` additionally executes every notebook top to bottom in a clean kernel (minutes; Split MNIST cells run only if `data/mnist` exists). The same two commands run in CI.
+`python -m pytest` runs the fast suite (about a minute or two); `python -m pytest -m slow` additionally executes every notebook top to bottom in a clean kernel (minutes; Split MNIST cells run only if `data/mnist` exists). The same two commands run in CI.
 
 - Shared and binary code: `test_features` (ordering, counts, the shared enumeration and zero-expansion helpers, output-level expansion invariance for binary and multiclass), `test_binary_features`, `test_binary_expansion` (exact copy, zeros, identical scores and probabilities on train/eval/random/outside inputs, invariant checked every step of the loop), `test_binary_training` (finite-difference gradient, loss decrease, reproducibility, frozen coefficients, zero-init learning, per-coefficient learning rates, preservation tests, preset-override guard), `test_binary_replay`, `test_binary_data`, `test_binary_plotting`.
 - Synthetic data: `test_synthetic_data` (sinusoidal experiences bit-identical to the pre-refactor generator, circular target geometry, reproducibility, independent train/test streams, label noise), `test_joint_studies`.
-- Class-incremental code: `test_class_incremental` and `test_mnist` (features, expansion invariant and its guard, masked evaluation, forgetting definition, per-class accuracy, takeover versus flip diagnostics, determinism, offline Split MNIST), `test_multiclass_model`, `test_multiclass_training`, `test_strategies` (the update restrictions of the six strategies), `test_class_incremental_plotting`, `test_reporting_rows`.
+- Class-incremental code: `test_class_incremental` and `test_mnist` (features, expansion invariant and its guard, masked evaluation, forgetting definition, per-class accuracy, takeover versus flip diagnostics, determinism, offline Split MNIST), `test_multiclass_model`, `test_multiclass_training`, `test_strategies` (the update restrictions of the two methods, `beta` validation, rejection of the earlier names), `test_class_incremental_plotting`, `test_reporting_rows`.
 - Execution efficiency: `test_lean_mode` (feature construction bit-identical to the previous formula, matching an independent float64 evaluation, correct at chunk boundaries and free of the large temporary array; diagnostics off by default in every function that takes them and opt-in on every command line; `diagnostics=True` learns exactly what the default run learns for every condition and update rule; a default run skips every observing helper and records none of its fields; summaries, study tables and the degree studies for both kinds of run; timings only on request and attributed to the operation they name; the helpers refusing a run without diagnostics) and `test_checkout` (the tests and the experiment scripts import this checkout, and a failing script shows what it printed).
-- Per-degree rates and sampling: `test_per_degree` (vector validation, per-group parameter updates, zero rates, masks, Strategy B, expansion, class counts, no future-class draws, reproducibility, accuracy/forgetting).
+- Per-degree rates and sampling: `test_per_degree` (vector validation, per-group parameter updates, zero rates, update masks, the relaxed method, expansion, class counts, no future-class draws, reproducibility, accuracy/forgetting, current versus legacy study loading).
+- Stable integration and equivalence: `test_stable_integration` and `test_binary_stable_integration` (the trainers call `stable_cl` with the effective rates; no second copy of the mathematics in `src/`), `test_equivalence_multiclass` and `test_equivalence_binary` (golden fixtures in `tests/golden`, recorded from the former implementation and not regenerated).
 - Replay and sampling: `test_replay_sampling` (memory draw and stored-index order, policy-to-sampler mapping, the trainer's injected sampler).
 - Structure: `test_architecture` (import graph without cycles, class-incremental code independent of the binary code, binary/model/trainer code independent of the class-incremental code, entry points not importing each other, no stale imports in source, tests, experiments and notebooks).
-- Workflows: `test_experiment_scripts` (the command-line tools) and `test_notebooks` (every notebook compiles, has unique valid cell ids, is committed without outputs, reads no result file, and executes cleanly under `-m slow`).
+- Workflows: `test_experiment_scripts` (the command-line tools) and `test_notebooks` (every notebook compiles, has unique valid cell ids, is committed without outputs, reads no result file, uses no retired strategy name in its class-incremental cells, passes no keyword argument that the imported package functions it calls do not accept, and executes cleanly under `-m slow`).
 
 ## Reproducibility
 
@@ -287,17 +333,17 @@ Everything is driven by explicit seeds (`np.random.default_rng([seed, experience
 
 ### Mechanism
 
-`run_condition(..., degree_control_factors=[m0, m1, m2, m3])` multiplies the per-degree learning rates by factors in [0, 1]: the effective rate of degree `d` is `eta_d * m_d`, and 0 freezes that degree. The result is one rate per feature, `d_j = eta_deg(j) * m_deg(j)` (`degree_rates.diagonal_learning_rates`), applied to the diagonal step every strategy already uses; it is never materialised as a matrix. A feature that appears through expansion takes the rate of its own degree from its first update, and all factors equal to 1 reproduce the uncontrolled run bit for bit.
+`run_condition(..., degree_control_factors=[m0, m1, m2, m3])` multiplies the per-degree learning rates by factors in [0, 1]: the effective rate of degree `d` is `eta_d * m_d`, and 0 freezes that degree. The result is one rate per feature, `d_j = eta_deg(j) * m_deg(j)` (`degree_rates.diagonal_learning_rates`), applied to the diagonal step every method already uses; it is never materialised as a matrix. A feature that appears through expansion takes the rate of its own degree from its first update, and all factors equal to 1 reproduce the uncontrolled run bit for bit.
 
 Compatibility with `feature_power`: a control that changes anything (some factor below 1) cannot be combined with `feature_power > 0` and raises `ValueError`. An all-ones control is the identity, is treated as no control, and is accepted with `feature_power`. A per-degree rate _vector_ (`learning_rate=[...]`) is rejected together with `feature_power` whether or not a control is given.
 
-Strategy B computes its null-space projection for the controlled step, so what it preserves is the logits on its _selected reference examples_. That is not the same as retaining the old-data distribution: the old-class accuracy can still fall, and the experiment below measures it.
+The relaxed method computes its null-space projection for the controlled step, so what it preserves (at `beta = 0`) is the logits on its _selected reference examples_. That is not the same as retaining the old-data distribution: the old-class accuracy can still fall, and the experiment below measures it.
 
 Degree control is an experimental mechanism for controlling degree-wise plasticity. Nothing here shows that it improves retention; see the results and their limits below.
 
 ### Candidate selection (`experiments/degree_control.py`, `polynomial_cl/continual/degree_control.py`)
 
-Per strategy (`ordinary`, `frozen_old`, `strategy_b`, each with its fixed rate vector, class-balanced sampling), on **validation data only**:
+Per method (`ordinary` and `relaxed` with `beta = 0`, each with its fixed rate vector from `BASELINES`, class-balanced sampling), on **validation data only**:
 
 - **A, single degrees.** The all-ones baseline, then one degree at a time with each factor in `0, 0.05, 0.1, 0.25, 0.5, 0.75` and the other degrees at 1.
 - **B, a limited set, no grid search.** (i) Combinations of two or more degrees whose best single-degree candidate beat the baseline's accuracy minus forgetting _and_ is feasible. (ii) Four fixed example vectors, which are **always evaluated**, independently of how their single-degree parts scored or whether those were feasible. Each is then selected or rejected only on its own measured metrics.
@@ -319,25 +365,26 @@ A candidate is feasible only if, for **every** experience, its seed-mean accurac
 - `min_mean_immediate_accuracy`: the minimum of that list. **This is what the floor is applied to** (on validation data); it is also reported for the test runs, where it is informative only.
 - `worst_immediate_accuracy`: a _per-run_ value, the worst experience within one run. Its `summary` entry is the mean over seeds of those per-run minima, which is never larger than `min_mean_immediate_accuracy` and smaller whenever the seeds disagree about which experience is worst. The floor is never applied to it.
 
-### Result of one saved run (Split MNIST)
+### Historical result of one saved run (Split MNIST, earlier API generation)
 
-`python experiments/degree_control.py --dataset split_mnist --output results/degree_control.json`: 10% of the training set held out for validation, selection seeds 0-2, test seeds 3-9, 3 epochs, batch size 128, 200 replay examples per class, 3 reference examples per class, floor 0.5. About four minutes on the CPU environment used here. The run is deterministic (a rerun after the final code changes reproduced the same selections and numbers); the generated JSON is not part of the repository. The table shows the baseline and the configuration selected as best overall (test seeds, means over 7 seeds).
+This record and the transfer figures quoted in the bullets below are historical. They were recorded with the earlier API generation, when the relaxed method was called `strategy_b`, and was not regenerated by the C5 documentation change. Only the two methods that still exist are listed; the third configuration of that study (`frozen_old`) was removed with its strategy.
 
-| Strategy | Selected factors | Accuracy (baseline → selected) | Forgetting (baseline → selected) | Second experience on arrival (baseline → selected) |
+`python experiments/degree_control.py --dataset split_mnist --output results/degree_control.json`: 10% of the training set held out for validation, selection seeds 0-2, test seeds 3-9, 3 epochs, batch size 128, 200 replay examples per class, 3 reference examples per class, floor 0.5. The run is deterministic; the generated JSON is not part of the repository. The table shows the baseline and the configuration selected as best overall (test seeds, means over 7 seeds).
+
+| Method | Selected factors | Accuracy (baseline → selected) | Forgetting (baseline → selected) | Second experience on arrival (baseline → selected) |
 | --- | --- | --- | --- | --- |
 | `ordinary` | `[0.05, 0.05, 0, 1]` | 0.7689 → 0.7595 | 0.0968 → 0.0739 | 0.867 → 0.786 |
-| `frozen_old` | `[1, 0.05, 0, 1]` | 0.7782 → 0.7684 | 0.1046 → 0.0832 | 0.883 → 0.769 |
-| `strategy_b` | `[1, 0.25, 0, 1]` | 0.7585 → 0.7538 | 0.0852 → 0.0669 | 0.839 → 0.716 |
+| `relaxed` (`beta = 0`) | `[1, 0.25, 0, 1]` | 0.7585 → 0.7538 | 0.0852 → 0.0669 | 0.839 → 0.716 |
 
-For each strategy the selected configuration had lower final accuracy (by 0.0048 to 0.0099) and lower forgetting (by 0.0183 to 0.0229) than its baseline in all 7 test seeds. The worst-case `min_mean_immediate_accuracy` on the test runs was 0.706 → 0.680 (`ordinary`), 0.722 → 0.704 (`frozen_old`) and 0.656 → 0.642 (`strategy_b`); in every strategy it is the last experience. On validation data 3 of 33 (`ordinary`), 3 of 30 (`frozen_old`) and 6 of 33 (`strategy_b`) candidates were infeasible. For example `m[1,0,0.05,1]` reaches only 0.485 on the first experience under `ordinary` and `frozen_old`, and an unconstrained accuracy-minus-forgetting rule would have chosen it.
+For each method the selected configuration had lower final accuracy (by 0.0048 to 0.0094) and lower forgetting (by 0.0183 to 0.0229) than its baseline in all 7 test seeds. The worst-case `min_mean_immediate_accuracy` on the test runs was 0.706 → 0.680 (`ordinary`) and 0.656 → 0.642 (`relaxed`); in both it is the last experience. On validation data 3 of 33 (`ordinary`) and 6 of 33 (`relaxed`) candidates were infeasible. For example `m[1,0,0.05,1]` reaches only 0.485 on the first experience under `ordinary`, and an unconstrained accuracy-minus-forgetting rule would have chosen it.
 
-Notebook 02 (I.7) first checks the mechanism (an all-ones control reproduces the uncontrolled run in every recorded quantity; a zero factor gives exactly zero coefficient change in its degree group), then re-runs the validation stage of this study (selection seeds 0-2, 10% validation split) and confirms that the rule selects the three vectors above, with a plot of eligible and infeasible candidates. The test comparison itself uses those fixed vectors: it re-runs them on the test seeds under both sampling policies, paired by seed with their baselines. `experiments/degree_control.py` fixes `class_balanced`, so the `shuffled` rows are a transfer check of vectors chosen under the other policy.
+Notebook 02 (I.7) first checks the mechanism (an all-ones control reproduces the uncontrolled run in every recorded quantity; a zero factor gives exactly zero coefficient change in its degree group), then re-runs the validation stage of this study (selection seeds 0-2, 10% validation split) and confirms that the rule selects the two vectors above, with a plot of eligible and infeasible candidates. The test comparison itself uses those fixed vectors: it re-runs them on the test seeds under both sampling policies, paired by seed with their baselines. `experiments/degree_control.py` fixes `class_balanced`, so the `shuffled` rows are a transfer check of vectors chosen under the other policy.
 
 ### What this does and does not show
 
 - The results are evidence from this experiment of a **plasticity-retention trade-off**: under the acquisition constraint, the selected configurations have lower measured forgetting and slightly lower final accuracy than their baselines. They do not show that degree control improves retention, and lower forgetting is not by itself better continual learning.
-- The floor is permissive. Every selected configuration passes it while learning the second experience 8 to 12 points worse on arrival than its baseline (table above), and all three set the degree-2 factor to 0. This experiment cannot separate "retains more" from "learns less strongly"; per-experience arrival accuracy has to be read together with forgetting.
-- Strategy B preserves its reference logits; the table does not measure old-data retention separately, and Strategy B's forgetting is still non-zero.
-- Selection ran under class-balanced sampling only. The notebook's I.7 transfer rows (same vectors, `shuffled` sampling, test seeds 3-9) show that the trade-off did not transfer: final accuracy was lower in 7 of 7 seeds for all three strategies, but forgetting was higher for `ordinary` (0.5045 to 0.5644) and `frozen_old` (0.6210 to 0.6648) and slightly lower only for `strategy_b` (0.4281 to 0.4182, lower in 5 of 7 seeds). The trade-off is therefore specific to the balanced protocol and to the base rates chosen for it. These are produced by running the notebook, not stored in a result file.
-- One dataset (Split MNIST with a fixed random projection, `--projection-seed 0`), one set of base rates per strategy, one floor, selection on three seeds of a 10% validation split. The seven test seeds vary the task plan and shuffling, not the data or the projection. The consistent direction over seeds is not a significance test and not evidence of generalisation. How the result changes with the floor was not studied.
+- The floor is permissive. Every selected configuration passes it while learning the second experience 8 to 12 points worse on arrival than its baseline (table above), and both set the degree-2 factor to 0. This experiment cannot separate "retains more" from "learns less strongly"; per-experience arrival accuracy has to be read together with forgetting.
+- The relaxed method (`beta = 0`) preserves its reference logits; the table does not measure old-data retention separately, and its forgetting is still non-zero.
+- Selection ran under class-balanced sampling only. The notebook's I.7 transfer rows (same vectors, `shuffled` sampling, test seeds 3-9) show that the trade-off did not transfer: final accuracy was lower in 7 of 7 seeds for both methods, but forgetting was higher for `ordinary` (0.5045 to 0.5644) and slightly lower only for `relaxed` (0.4281 to 0.4182, lower in 5 of 7 seeds). The trade-off is therefore specific to the balanced protocol and to the base rates chosen for it. These are produced by running the notebook, not stored in a result file; the figures quoted here are historical in the same sense as the table above.
+- One dataset (Split MNIST with a fixed random projection, `--projection-seed 0`), one set of base rates per method, one floor, selection on three seeds of a 10% validation split. The seven test seeds vary the task plan and shuffling, not the data or the projection. The consistent direction over seeds is not a significance test and not evidence of generalisation. How the result changes with the floor was not studied.
 - No configuration is claimed to be optimal. The selected vectors are what this protocol chose on this validation split.

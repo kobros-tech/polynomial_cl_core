@@ -1,7 +1,11 @@
 # Copyright (c) 2026 Mohamed Alkobrosli
 # SPDX-License-Identifier: MIT
 
+import ast
+import importlib
+import inspect
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -49,7 +53,7 @@ def test_notebook_executes_top_to_bottom_in_a_clean_kernel(path):
             if cell.cell_type == "code"
             for output in cell.outputs
         )
-        assert "fixed_capacity" in printed and "ordinary_no_replay" in printed
+        assert "fixed_capacity" in printed and "relaxed" in printed
 
 
 @pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
@@ -105,3 +109,117 @@ def test_joint_training_notebook_does_not_report_forgetting():
     for index, cell in enumerate(notebook["cells"]):
         if cell["cell_type"] == "code":
             assert "forgetting" not in "".join(cell["source"]).lower(), index
+
+
+# Strategy names of the pre-C4 class-incremental API. The current methods are ``ordinary`` and
+# ``relaxed`` (with ``beta``), and replay is the protocol option ``replay``. The names may be
+# mentioned only in a markdown cell that is explicitly a "Migration note". The binary module of
+# Part II has presets of its own that share some of these names; Part II is therefore excluded.
+RETIRED_STRATEGY_NAMES = re.compile(
+    r"strategy_b\w*|frozen_old|small_old_lr|ordinary_no_replay"
+)
+
+
+def _source(cell):
+    return "".join(cell["source"])
+
+
+def _class_incremental_cells(path):
+    """Every cell of notebook 01; the cells of notebook 02 before its Part II heading."""
+    cells = json.loads(path.read_text(encoding="utf-8"))["cells"]
+    for index, cell in enumerate(cells):
+        if cell["cell_type"] == "markdown" and _source(cell).startswith("# Part II"):
+            return cells[:index]
+    return cells
+
+
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
+def test_class_incremental_cells_use_no_retired_strategy_names(path):
+    for cell in _class_incremental_cells(path):
+        source = _source(cell)
+        found = RETIRED_STRATEGY_NAMES.findall(source)
+        if cell["cell_type"] == "code":
+            assert not found, (path.name, found, source[:80])
+        elif found:
+            assert "Migration note" in source, (path.name, found, source[:80])
+
+
+def _package_callables(tree):
+    """``{local name: object}`` for what a cell imports from the package (modules included)."""
+    objects = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            if node.module.startswith("polynomial_cl"):
+                module = importlib.import_module(node.module)
+                for alias in node.names:
+                    name = alias.asname or alias.name
+                    try:
+                        objects[name] = getattr(module, alias.name)
+                    except AttributeError:  # a submodule import
+                        objects[name] = importlib.import_module(
+                            f"{node.module}.{alias.name}"
+                        )
+    return objects
+
+
+@pytest.mark.parametrize("path", NOTEBOOKS, ids=lambda p: p.name)
+def test_notebook_calls_pass_only_arguments_the_current_api_accepts(path):
+    """Supplementary static guard: unknown keywords and too many positional arguments.
+
+    Covered: calls whose function name is imported by the notebook itself from
+    ``polynomial_cl`` (``from polynomial_cl... import f``) or reached through a module alias
+    imported the same way (``P.plot_cil_tradeoff``). For those calls it checks that every
+    explicit keyword exists in the current signature and that the positional arguments are
+    not more than it takes.
+
+    Not covered: calls on instances (``model.expanded(4)``), ``**kwargs`` unpacking (the
+    keywords inside it are not seen), starred positional arguments, whether every *required*
+    argument is supplied, argument types and values, and names the notebook defines or
+    gets from other libraries. It does not replace executing the notebooks.
+    """
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    namespace = {}  # imports accumulate over the cells, as in the kernel
+    problems = []
+    for index, cell in enumerate(notebook["cells"]):
+        if cell["cell_type"] != "code":
+            continue
+        code = "".join(
+            line for line in cell["source"] if not line.lstrip().startswith(("%", "!"))
+        )
+        tree = ast.parse(code)
+        namespace.update(_package_callables(tree))
+        for call in (n for n in ast.walk(tree) if isinstance(n, ast.Call)):
+            func = call.func
+            if isinstance(func, ast.Name):
+                target = namespace.get(func.id)
+            elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                owner = namespace.get(func.value.id)
+                target = (
+                    getattr(owner, func.attr, None) if inspect.ismodule(owner) else None
+                )
+            else:
+                continue
+            if not (inspect.isfunction(target) or inspect.isclass(target)):
+                continue
+            try:
+                parameters = inspect.signature(target).parameters
+            except (TypeError, ValueError):
+                continue
+            takes_kwargs = any(p.kind is p.VAR_KEYWORD for p in parameters.values())
+            takes_args = any(p.kind is p.VAR_POSITIONAL for p in parameters.values())
+            positional = [
+                p
+                for p in parameters.values()
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+            ]
+            where = f"{path.name} cell {index}: {ast.unparse(func)}"
+            for keyword in call.keywords:
+                if keyword.arg is not None and not takes_kwargs:
+                    if keyword.arg not in parameters:
+                        problems.append(f"{where}: unexpected keyword {keyword.arg!r}")
+            if not takes_args and not any(
+                isinstance(a, ast.Starred) for a in call.args
+            ):
+                if len(call.args) > len(positional):
+                    problems.append(f"{where}: too many positional arguments")
+    assert not problems, "\n".join(problems)

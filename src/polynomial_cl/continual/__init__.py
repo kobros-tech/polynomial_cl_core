@@ -43,12 +43,12 @@ from .experiment import (
     summarize_runs,
     summary_rows,
 )
-from .strategies import STRATEGIES, update_restrictions
+from .strategies import METHODS, update_restrictions
 
 __all__ = [
     "CONDITIONS",
     "N_DEGREE_GROUPS",
-    "STRATEGIES",
+    "METHODS",
     "TASK_ORDER",
     "apply_degree_control",
     "as_degree_control",

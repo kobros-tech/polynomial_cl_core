@@ -16,6 +16,7 @@ from common import (
     add_dataset_arguments,
     add_diagnostics_argument,
     add_sampling_argument,
+    add_update_arguments,
     load_dataset,
 )
 
@@ -32,8 +33,8 @@ from polynomial_cl.continual.experiment import (
     EPOCHS,
     LEARNING_RATE,
     MEMORY_PER_CLASS,
+    METHODS,
     N_REF_PER_CLASS,
-    STRATEGIES,
 )
 
 
@@ -42,15 +43,19 @@ def main():
     add_dataset_arguments(p)
     p.add_argument(
         "--experiment",
-        choices=("conditions", "strategies"),
+        choices=("conditions", "methods"),
         default="conditions",
-        help="conditions: fixed_linear/expanding/fixed_capacity; strategies: update rules on 'expanding'",
+        help="conditions: fixed_linear/expanding/fixed_capacity; methods: update methods on 'expanding'",
     )
     p.add_argument(
-        "--n-ref-per-class", type=int, default=N_REF_PER_CLASS, help="strategy_b only"
+        "--n-ref-per-class",
+        type=int,
+        default=N_REF_PER_CLASS,
+        help="relaxed method only",
     )
     p.add_argument("--output", type=Path, required=True)
     add_diagnostics_argument(p)
+    add_update_arguments(p)
     add_sampling_argument(p)
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     p.add_argument("--epochs", type=int, default=EPOCHS)
@@ -72,6 +77,8 @@ def main():
     args = p.parse_args()
     if not args.seeds:
         p.error("at least one seed is required")
+    if args.experiment == "conditions" and (args.beta != 0.0 or not args.replay):
+        p.error("--beta and --no-replay apply to --experiment methods only")
     if min(args.epochs, args.batch_size, args.memory_per_class) < 1:
         p.error("epochs, batch-size and memory-per-class must be positive")
 
@@ -91,10 +98,12 @@ def main():
         "sampling": args.sampling,
     }
     data = make_feature_data(train_x, train_y, test_x, test_y)
-    if args.experiment == "strategies":
+    if args.experiment == "methods":
         result = run_strategy_comparison(
             data,
             args.seeds,
+            beta=args.beta,
+            replay=args.replay,
             n_ref_per_class=args.n_ref_per_class,
             diagnostics=args.diagnostics,
             **settings,
@@ -116,7 +125,9 @@ def main():
             "memory_per_class": args.memory_per_class,
             "experiment": args.experiment,
             "degrees_by_condition": {name: list(d) for name, d in DEGREES.items()},
-            "strategies": list(STRATEGIES) if args.experiment == "strategies" else None,
+            "methods": list(METHODS) if args.experiment == "methods" else None,
+            "beta": args.beta if args.experiment == "methods" else None,
+            "replay": args.replay if args.experiment == "methods" else None,
             "n_ref_per_class": args.n_ref_per_class,
             "diagnostics": args.diagnostics,
             **data_settings,

@@ -1,10 +1,11 @@
 # Copyright (c) 2026 Mohamed Alkobrosli
 # SPDX-License-Identifier: MIT
 
-"""Degree-control matrix M: effective step ``H M`` for every strategy."""
+"""Degree-control matrix M: effective step ``H M`` for every method."""
 
 import numpy as np
 import pytest
+from null_basis_support import null_space_basis
 
 from polynomial_cl.continual import make_feature_data, make_task_plan, run_condition
 from polynomial_cl.continual.degree_rates import (
@@ -14,8 +15,8 @@ from polynomial_cl.continual.degree_rates import (
     step_scale_for,
 )
 from polynomial_cl.continual.experiment import MAX_DEGREE
-from polynomial_cl.continual.strategies import STRATEGIES
-from polynomial_cl.training.multiclass import fit_task, null_space_basis
+from polynomial_cl.continual.strategies import METHODS
+from polynomial_cl.training.multiclass import fit_task
 
 RATES = [3.0, 3.0, 0.75, 3.0]
 
@@ -31,7 +32,7 @@ def data():
     return make_feature_data(x, y, tx, ty)
 
 
-def run(data, strategy="ordinary", factors=None, rates=RATES, seed=3, **kw):
+def run(data, method="ordinary", factors=None, rates=RATES, seed=3, **kw):
     tasks, memory = make_task_plan(data.train_y, seed, 20)
     return run_condition(
         "expanding",
@@ -41,7 +42,7 @@ def run(data, strategy="ordinary", factors=None, rates=RATES, seed=3, **kw):
         seed=seed,
         epochs=2,
         batch_size=32,
-        strategy=strategy,
+        method=method,
         learning_rate=rates,
         sampling="class_balanced",
         degree_control_factors=factors,
@@ -99,20 +100,18 @@ def test_effective_rate_is_the_product():
 
 
 # ------------------------------------------------------------------ equivalence
-@pytest.mark.parametrize("strategy", STRATEGIES)
-def test_all_ones_reproduces_the_original_run_exactly(data, strategy):
-    assert same(run(data, strategy), run(data, strategy, [1.0] * 4))
-    assert same(run(data, strategy), run(data, strategy, [1, 1, 1, 1]))
+@pytest.mark.parametrize("method", METHODS)
+def test_all_ones_reproduces_the_original_run_exactly(data, method):
+    assert same(run(data, method), run(data, method, [1.0] * 4))
+    assert same(run(data, method), run(data, method, [1, 1, 1, 1]))
 
 
-@pytest.mark.parametrize("strategy", ["ordinary", "frozen_old", "strategy_b"])
+@pytest.mark.parametrize("method", ["ordinary", "relaxed"])
 @pytest.mark.parametrize("factors", [[1, 0, 1, 1], [1, 1, 0.05, 1], [0.25, 1, 1, 0]])
-def test_control_equals_the_product_as_learning_rate(data, strategy, factors):
+def test_control_equals_the_product_as_learning_rate(data, method, factors):
     """Zero (or 0.05, ...) control == the same effective learning rate, bit for bit."""
     effective = list(np.array(RATES) * np.array(factors))
-    assert same(
-        run(data, strategy, factors), run(data, strategy, None, rates=effective)
-    )
+    assert same(run(data, method, factors), run(data, method, None, rates=effective))
 
 
 def test_zero_factor_equals_zero_learning_rate_for_ordinary_sgd(data):
@@ -122,9 +121,9 @@ def test_zero_factor_equals_zero_learning_rate_for_ordinary_sgd(data):
 
 
 # ------------------------------------------------------------------ freezing / scaling
-@pytest.mark.parametrize("strategy", ["ordinary", "frozen_old", "strategy_b"])
-def test_zero_factor_freezes_that_group_and_others_still_move(data, strategy):
-    r = run(data, strategy, [1, 0, 1, 1])
+@pytest.mark.parametrize("method", ["ordinary", "relaxed"])
+def test_zero_factor_freezes_that_group_and_others_still_move(data, method):
+    r = run(data, method, [1, 0, 1, 1])
     change = r["degree_diagnostics"]["coef_change_l1"]
     for task_row in change:
         assert task_row[1] == 0.0
@@ -140,17 +139,16 @@ def test_all_zero_factors_train_nothing(data):
     assert r["effective_degree_learning_rates"] == [0.0] * 4
 
 
-def test_all_zero_factors_also_work_for_strategy_b_and_frozen(data):
-    for strategy in ("strategy_b", "frozen_old"):
-        r = run(data, strategy, [0, 0, 0, 0])
-        assert all(v == 0.0 for v in r["l1_update_by_task"])
+def test_all_zero_factors_also_work_for_the_relaxed_method(data):
+    r = run(data, "relaxed", [0, 0, 0, 0])
+    assert all(v == 0.0 for v in r["l1_update_by_task"])
 
 
-@pytest.mark.parametrize("strategy", ["ordinary", "frozen_old", "strategy_b"])
-def test_zero_active_degrees_skip_training_until_expansion(data, strategy):
+@pytest.mark.parametrize("method", ["ordinary", "relaxed"])
+def test_zero_active_degrees_skip_training_until_expansion(data, method):
     # Degrees 0 and 1 are the only active groups in the first experience and both are
     # controlled to zero, although the full control vector is not all zero.
-    r = run(data, strategy, [0, 0, 1, 1])
+    r = run(data, method, [0, 0, 1, 1])
 
     assert r["l1_update_by_task"][0] == 0.0
     assert r["n_trainable_by_task"][0] == 0
@@ -195,32 +193,17 @@ def test_factor_005_scales_one_update_by_5_percent_and_leaves_others_alone():
     assert np.array_equal(ctrl[~g2], ref[~g2])  # uncontrolled groups bit-identical
 
 
-def test_frozen_old_keeps_its_freezing_and_adds_the_control(data):
-    a = run(data, "frozen_old", [1, 1, 1, 1])
-    b = run(data, "frozen_old", [1, 0.25, 1, 1])
-    assert a["n_trainable_by_task"] == b["n_trainable_by_task"]
-    assert a["accuracy_matrix"] != b["accuracy_matrix"]
-    da, db = a["degree_diagnostics"], b["degree_diagnostics"]
-    assert (
-        da["n_trainable"] == db["n_trainable"]
-    )  # the control never changes what is frozen
-    for task in range(1, 5):  # old rows stay frozen: fewer trainable than coefficients
-        assert da["n_trainable"][task][0] < da["n_coefficients"][task][0]
-    assert all(row[1] == 3.0 * 0.25 for row in db["lr"])  # effective rate of degree 1
-    assert all(row[1] == 3.0 for row in da["lr"])
-
-
-# ------------------------------------------------------------------ Strategy B
+# ------------------------------------------------------------------ relaxed method
 @pytest.mark.parametrize(
     "factors", [[1, 1, 1, 1], [1, 0.05, 1, 1], [0, 1, 0.25, 1], [1, 0, 0.05, 1]]
 )
-def test_strategy_b_preserves_reference_logits_under_control(data, factors):
-    r = run(data, "strategy_b", factors)
+def test_relaxed_preserves_reference_logits_under_control(data, factors):
+    r = run(data, "relaxed", factors)
     changes = [v for v in r["ref_logit_change_by_task"] if v is not None]
     assert changes and max(changes) < 1e-3
 
 
-def test_strategy_b_projection_uses_the_controlled_step_scale():
+def test_relaxed_projection_uses_the_controlled_step_scale():
     """sqrt(D) N N^T sqrt(D) g leaves the reference design unchanged for D = H M."""
     rng = np.random.default_rng(2)
     group = degree_of_feature(16, MAX_DEGREE)[:153]  # degree 2
@@ -361,7 +344,7 @@ def test_study_rejects_an_invalid_acquisition_floor(data, bad):
 
     with pytest.raises(ValueError, match="min_acquisition_accuracy"):
         run_degree_control_study(
-            data, data, [0], [1], min_acquisition_accuracy=bad, strategies=("ordinary",)
+            data, data, [0], [1], min_acquisition_accuracy=bad, methods=("ordinary",)
         )
 
 
@@ -374,7 +357,7 @@ def study(data):
         data,
         [0],
         [1],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         epochs=1,
         batch_size=64,
         memory_per_class=5,
@@ -405,7 +388,7 @@ def stub_runs(monkeypatch, immediate):
     """Replace the training loop: ``immediate(factors)`` gives the diagonal of every run."""
     from polynomial_cl.continual import degree_control as dc
 
-    def fake(data, seeds, strategy, rates, factors, *, settings):
+    def fake(data, seeds, method, rates, factors, *, settings):
         return [
             {
                 **dc.with_immediate_accuracy(fake_run(immediate(tuple(factors)))),
@@ -425,7 +408,7 @@ def test_study_reports_that_nothing_was_selected_when_no_candidate_is_feasible(
 ):
     dc = stub_runs(monkeypatch, lambda factors: [0.3] * 5)  # nothing learns on arrival
     result = dc.run_degree_control_study(
-        None, None, [0], [1], strategies=("ordinary",), min_acquisition_accuracy=0.5
+        None, None, [0], [1], methods=("ordinary",), min_acquisition_accuracy=0.5
     )
     sel = result["cells"][0]["selection"]
     assert sel["feasible"] == [] and not sel["baseline_feasible"]
@@ -447,7 +430,7 @@ def test_study_never_selects_a_candidate_that_defers_learning(monkeypatch):
 
     dc = stub_runs(monkeypatch, immediate)
     result = dc.run_degree_control_study(
-        None, None, [0], [1], strategies=("ordinary",), min_acquisition_accuracy=0.5
+        None, None, [0], [1], methods=("ordinary",), min_acquisition_accuracy=0.5
     )
     sel = result["cells"][0]["selection"]
     assert sel["feasible"] == ["m[1,1,1,1]"] and sel["baseline_feasible"]
@@ -469,7 +452,7 @@ def test_feasible_pareto_front_never_contains_an_infeasible_candidate(monkeypatc
         # degree 2 switched off: best-looking metrics, but experience 2 is never learned
         return factors[1] == 0.0
 
-    def fake(data, seeds, strategy, rates, factors, *, settings):
+    def fake(data, seeds, method, rates, factors, *, settings):
         bad = deferred(tuple(factors))
         run = fake_run([0.9, 0.0, 0.9, 0.9, 0.9] if bad else [0.9] * 5)
         run["final_mean_accuracy"] = 0.95 if bad else 0.80
@@ -486,7 +469,7 @@ def test_feasible_pareto_front_never_contains_an_infeasible_candidate(monkeypatc
 
     monkeypatch.setattr(dc, "run_seeds", fake)
     result = dc.run_degree_control_study(
-        None, None, [0], [1], strategies=("ordinary",), min_acquisition_accuracy=0.5
+        None, None, [0], [1], methods=("ordinary",), min_acquisition_accuracy=0.5
     )
     sel = result["cells"][0]["selection"]
     feasible = set(sel["feasible"])
@@ -513,7 +496,7 @@ def test_feasible_pareto_front_never_contains_an_infeasible_candidate(monkeypatc
 def test_feasible_pareto_fronts_are_empty_when_nothing_is_feasible(monkeypatch):
     dc = stub_runs(monkeypatch, lambda factors: [0.3] * 5)  # nothing learns on arrival
     result = dc.run_degree_control_study(
-        None, None, [0], [1], strategies=("ordinary",), min_acquisition_accuracy=0.5
+        None, None, [0], [1], methods=("ordinary",), min_acquisition_accuracy=0.5
     )
     sel = result["cells"][0]["selection"]
     assert sel["pareto_feasible"] == [] and sel["pareto_individual_feasible"] == []
@@ -551,7 +534,7 @@ def test_final_rows_report_both_quantities_under_their_own_names(monkeypatch):
         None,
         [0, 1],
         [2, 3],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         min_acquisition_accuracy=0.1,
     )
     row = result["cells"][0]["final"]["baseline"]
@@ -603,12 +586,15 @@ def test_valid_seed_lists_are_returned_as_plain_integer_lists():
     assert all(type(x) is int for x in select + test)
 
 
-@pytest.mark.parametrize("strategies", [(), ("no_such_strategy",), ("ordinary", "b")])
-def test_study_rejects_empty_or_unknown_strategies_before_running(strategies):
+@pytest.mark.parametrize(
+    "methods",
+    [(), ("no_such_method",), ("ordinary", "b"), ("frozen_old",), ("strategy_b",)],
+)
+def test_study_rejects_empty_or_unknown_methods_before_running(methods):
     from polynomial_cl.continual.degree_control import run_degree_control_study
 
-    with pytest.raises(ValueError, match="strategies must be a non-empty subset"):
-        run_degree_control_study(None, None, [0], [1], strategies=strategies)
+    with pytest.raises(ValueError, match="methods must be a non-empty subset"):
+        run_degree_control_study(None, None, [0], [1], methods=methods)
 
 
 # ------------------------------------------------------------ example vectors in B
@@ -641,7 +627,7 @@ def test_example_vectors_are_evaluated_but_selected_only_on_their_own_metrics(
 
     dc = stub_runs(monkeypatch, immediate)
     result = dc.run_degree_control_study(
-        None, None, [0], [1], strategies=("ordinary",), min_acquisition_accuracy=0.5
+        None, None, [0], [1], methods=("ordinary",), min_acquisition_accuracy=0.5
     )
     sel = result["cells"][0]["selection"]
     examples = {dc.name_of(v) for v in dc.EXAMPLE_VECTORS}
@@ -687,7 +673,7 @@ def test_selection_does_not_depend_on_the_test_data(data, study):
         other_test,
         [0],
         [1],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         epochs=1,
         batch_size=64,
         memory_per_class=5,
@@ -708,7 +694,7 @@ def test_final_comparison_pairs_every_row_with_the_baseline_on_the_same_test_see
         None,
         [0],
         [4, 2, 7],
-        strategies=("ordinary",),
+        methods=("ordinary",),
         min_acquisition_accuracy=0.5,
     )
     final = result["cells"][0]["final"]

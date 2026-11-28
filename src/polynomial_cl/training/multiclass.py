@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import numpy as np
+import stable_cl
 
 from ..models.multiclass import softmax
 
@@ -25,6 +26,7 @@ def fit_task(
     update_scale: np.ndarray | None = None,
     null_basis: np.ndarray | None = None,
     null_groups: list | None = None,
+    beta: float = 0.0,
     feature_scale: np.ndarray | None = None,
     group_scale: np.ndarray | None = None,
     group_index: np.ndarray | None = None,
@@ -60,6 +62,18 @@ def fit_task(
     null-space projection, holds for D; the two arguments stay separate because they are
     different mechanisms. The effective rate of feature i is ``learning_rate * D[i]``.
 
+    The mathematics of the update is that of the ``stable_cl`` package, with the effective rate
+    ``d = learning_rate * D`` (float64, learning rate included) as its diagonal. The ordinary
+    step ``d[:, None] * G`` is :func:`stable_cl.ordinary_step`; it is written inline because that
+    function re-validates its arguments on every call and this loop calls it once per
+    mini-batch. Every null-space step is :func:`stable_cl.relaxed_step` with the relaxation
+    ``beta`` (default 0, validated in [0, 1]; it has an effect only together with
+    ``null_basis`` or ``null_groups``): ``beta = 0`` keeps every step inside the null space and
+    ``beta = 1`` is the ordinary step ``d[:, None] * G`` up to round-off, for every basis.
+    ``update_scale`` is applied to the gradient first, so the step is ``S(update_scale * G)``.
+    A ``null_groups`` entry applies the step to its own columns only; columns of a gradient
+    are independent under the step, so this equals applying each group's basis to its block.
+
     ``epoch_sampler`` selects how mini-batches are formed. ``None`` (default) shuffles the
     combined rows every epoch and reads each once. Otherwise it is a callable
     ``epoch_sampler(labels, n_updates, batch_size, rng)`` yielding the index batches of one
@@ -92,6 +106,13 @@ def fit_task(
         raise ValueError("labels must index an output class")
     if update_scale is not None and update_scale.shape != weights.shape:
         raise ValueError("update_scale must have the same shape as weights")
+    if isinstance(beta, (bool, np.bool_)) or not isinstance(
+        beta, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("beta must be a real number")
+    if not 0.0 <= float(beta) <= 1.0:  # also rejects NaN
+        raise ValueError("beta must be in [0, 1]")
+    beta = float(beta)
     if null_basis is not None and null_basis.shape[0] != weights.shape[0]:
         raise ValueError("null_basis must have one row per feature")
     if null_groups is not None:
@@ -129,7 +150,10 @@ def fit_task(
             step_scale = step_scale * feature_scale
         if group_scale is not None:
             step_scale = step_scale * group_scale
-        scale_root = np.sqrt(step_scale)[:, None]
+    # effective per-feature rate d = learning_rate * D, in float64, learning rate included
+    rates = np.full(weights.shape[0], float(learning_rate))
+    if step_scale is not None:
+        rates = rates * step_scale.astype(np.float64)
     if eligible_classes is None:
         eligible_classes = np.arange(weights.shape[1], dtype=np.int64)
     else:
@@ -173,28 +197,17 @@ def fit_task(
         raw_gradient = gradient
         if update_scale is not None:
             gradient = gradient * update_scale[:, eligible_classes]
+        gradient = np.asarray(gradient, dtype=np.float64)
         if null_groups is not None:
-            masked = gradient
-            gradient = (
-                masked.copy() if step_scale is None else masked * step_scale[:, None]
-            )
+            step = rates[:, None] * gradient  # columns outside every group: ordinary
             for columns, basis in null_groups:
-                if step_scale is None:
-                    gradient[:, columns] = basis @ (basis.T @ masked[:, columns])
-                else:
-                    gradient[:, columns] = scale_root * (
-                        basis @ (basis.T @ (scale_root * masked[:, columns]))
-                    )
-        elif step_scale is None:
-            if null_basis is not None:
-                gradient = null_basis @ (null_basis.T @ gradient)
-        elif null_basis is None:
-            gradient = gradient * step_scale[:, None]
+                step[:, columns] = stable_cl.relaxed_step(
+                    gradient[:, columns], basis, rates, beta
+                )
+        elif null_basis is not None:
+            step = stable_cl.relaxed_step(gradient, null_basis, rates, beta)
         else:
-            gradient = scale_root * (
-                null_basis @ (null_basis.T @ (scale_root * gradient))
-            )
-        step = learning_rate * gradient
+            step = rates[:, None] * gradient  # stable_cl.ordinary_step, inline
         weights[:, eligible_classes] -= step
         if group_index is not None:
             grad_l1 += np.bincount(
@@ -217,16 +230,6 @@ def fit_task(
             stats["mean_gradient_l1_by_group"] = (grad_l1 / n_updates).tolist()
             stats["mean_step_l1_by_group"] = (step_l1 / n_updates).tolist()
     return weights
-
-
-def null_space_basis(design: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
-    """Orthonormal basis (n_features, k) of {v : design @ v = 0}; k = 0 if nothing is free."""
-    design = np.asarray(design, dtype=np.float64)
-    if design.shape[0] == 0:
-        return np.eye(design.shape[1], dtype=np.float32)
-    _, singular, vt = np.linalg.svd(design, full_matrices=True)
-    rank = int(np.sum(singular > rtol * max(singular[0], 1.0)))
-    return vt[rank:].T.astype(np.float32)
 
 
 def cross_entropy(weights, features, labels, n_classes):
